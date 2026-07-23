@@ -1,0 +1,5 @@
+# These are drop-in files for a crosspoint-reader (@1.4.1) fork; their headers
+# (Activity.h, GfxRenderer, WiFi.h, …) resolve only inside that firmware tree,
+# not this web repo. Suppress editor diagnostics here to avoid false errors.
+Diagnostics:
+  Suppress: "*"
