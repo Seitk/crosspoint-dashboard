@@ -85,6 +85,60 @@ export function canPlace(widgets, grid, widgetId, placement) {
   return cellsOf(placement).every((key) => !taken.has(key));
 }
 
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+// ---- pointer gestures -------------------------------------------------------
+// These translate a pixel gesture into a grid placement. They are pure so the
+// drag behaviour is unit-tested; the React overlay only does the bookkeeping of
+// tracking pointer deltas and asking canPlace() whether to commit.
+
+/** Which cell a point on the canvas falls in. Clamped to the grid. */
+export function pointToCell(point, grid, canvas = CANVAS) {
+  const { cellW, cellH, margin, gutter, cols, rows } = cellMetrics(grid, canvas);
+  return {
+    col: clamp(Math.floor((point.x - margin) / (cellW + gutter)), 0, cols - 1),
+    row: clamp(Math.floor((point.y - margin) / (cellH + gutter)), 0, rows - 1),
+  };
+}
+
+/**
+ * Where a widget lands after being dragged by (dx, dy) canvas pixels. The moved
+ * top-left snaps to the nearest cell origin (round, so a half-cell drag commits)
+ * and is clamped so the widget's span stays inside the grid. Span is preserved.
+ */
+export function dragPlacement(widget, dx, dy, grid, canvas = CANVAS) {
+  const { cellW, cellH, margin, gutter, cols, rows } = cellMetrics(grid, canvas);
+  const rect = cellRect(widget, grid, canvas);
+  const colSpan = widget.colSpan ?? 1;
+  const rowSpan = widget.rowSpan ?? 1;
+  return {
+    col: clamp(Math.round((rect.x + dx - margin) / (cellW + gutter)), 0, cols - colSpan),
+    row: clamp(Math.round((rect.y + dy - margin) / (cellH + gutter)), 0, rows - rowSpan),
+    colSpan,
+    rowSpan,
+  };
+}
+
+/**
+ * New spans after dragging a widget's bottom-right corner by (dx, dy) canvas
+ * pixels. Origin is fixed; spans snap to whole cells, never go below 1x1, and
+ * never run past the grid edge.
+ */
+export function resizePlacement(widget, dx, dy, grid, canvas = CANVAS) {
+  const { cellW, cellH, gutter, cols, rows } = cellMetrics(grid, canvas);
+  const rect = cellRect(widget, grid, canvas);
+  const col = widget.col ?? 0;
+  const row = widget.row ?? 0;
+  return {
+    col,
+    row,
+    colSpan: clamp(Math.round((rect.w + dx + gutter) / (cellW + gutter)), 1, cols - col),
+    rowSpan: clamp(Math.round((rect.h + dy + gutter) / (cellH + gutter)), 1, rows - row),
+  };
+}
+
 /** Pull a placement back inside the grid (used when the grid shrinks). */
 export function clampPlacement(placement, grid) {
   const { cols, rows } = { ...DEFAULT_GRID, ...grid };

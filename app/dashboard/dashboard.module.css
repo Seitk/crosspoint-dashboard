@@ -206,6 +206,130 @@ button:disabled {
   gap: 8px;
 }
 
+/* Positioning context shared by the canvas, the drag overlay and the popover. */
+.stage {
+  position: relative;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  /* The canvas has a 1px border; the overlay's coordinates are canvas-relative. */
+  margin: 1px;
+}
+
+/* A draggable tile. Transparent by default so the real render stays readable. */
+.tile {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 1px dashed transparent;
+  background: transparent;
+  cursor: grab;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  overflow: hidden;
+  touch-action: none; /* let pointermove drive the drag instead of scrolling */
+}
+
+.tile:hover,
+.tile:focus-visible {
+  border-color: #0a7;
+  background: rgba(0, 170, 119, 0.08);
+  outline: none;
+}
+
+.tile[data-selected="yes"] {
+  border-color: #0a7;
+  border-style: solid;
+  background: rgba(0, 170, 119, 0.12);
+}
+
+/* Mid-drag: solid while the drop is legal, red once it isn't. */
+.tile[data-active="yes"] {
+  cursor: grabbing;
+  border-style: solid;
+  border-color: #0a7;
+  background: rgba(0, 170, 119, 0.18);
+  z-index: 2;
+}
+
+.tile[data-active="yes"][data-legal="no"] {
+  border-color: #b00;
+  background: rgba(187, 0, 0, 0.18);
+  cursor: not-allowed;
+}
+
+.tileName {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  color: #056;
+  background: rgba(255, 255, 255, 0.75);
+  pointer-events: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+}
+
+.tile:hover .tileName,
+.tile[data-selected="yes"] .tileName,
+.tile[data-active="yes"] .tileName {
+  opacity: 1;
+}
+
+/* Bottom-right corner grip for span resizing. */
+.resizeHandle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, #0a7 50%);
+  opacity: 0;
+  touch-action: none;
+}
+
+.tile:hover .resizeHandle,
+.tile:focus-visible .resizeHandle,
+.tile[data-selected="yes"] .resizeHandle,
+.tile[data-active="yes"] .resizeHandle {
+  opacity: 1;
+}
+
+/* Edit popover anchored to its tile. */
+.popover {
+  position: absolute;
+  z-index: 10;
+  width: min(320px, 90%);
+  max-height: 70vh;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #111;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  padding: 12px;
+}
+
+.popoverHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.popoverHead .cellHint {
+  margin-left: 0;
+}
+
+.popoverHead > button:last-child {
+  margin-left: auto;
+}
+
 /* Per-space grid dimensions (cols / rows / margin / gutter). */
 .gridControls {
   display: grid;

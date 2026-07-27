@@ -6,10 +6,13 @@ import {
   canPlace,
   cellRect,
   clampPlacement,
+  dragPlacement,
   inferGrid,
   layoutSpace,
   migrateSpacesState,
+  pointToCell,
   refitToGrid,
+  resizePlacement,
   snapToGrid,
   validate,
 } from "../app/dashboard/grid.js";
@@ -142,6 +145,92 @@ test("inferGrid: distinct pixel origins become columns and rows", () => {
   ]);
   assert.equal(grid.cols, 2);
   assert.equal(grid.rows, 2);
+});
+
+// ---- pointer gestures -------------------------------------------------------
+
+const G32 = { cols: 3, rows: 2, margin: 16, gutter: 12 };
+
+test("pointToCell: a point inside a cell resolves to that cell", () => {
+  // Centre of each cell must map back to its own coordinates.
+  for (let row = 0; row < G32.rows; row++) {
+    for (let col = 0; col < G32.cols; col++) {
+      const r = cellRect({ col, row, colSpan: 1, rowSpan: 1 }, G32);
+      const centre = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+      assert.deepEqual(pointToCell(centre, G32), { col, row }, `centre of ${col},${row}`);
+    }
+  }
+});
+
+test("pointToCell: points outside the canvas clamp to the edge cells", () => {
+  assert.deepEqual(pointToCell({ x: -500, y: -500 }, G32), { col: 0, row: 0 });
+  assert.deepEqual(pointToCell({ x: 99999, y: 99999 }, G32), { col: 2, row: 1 });
+});
+
+test("dragPlacement: dragging one cell to the right moves one column", () => {
+  const w = { id: "a", col: 0, row: 0, colSpan: 1, rowSpan: 1 };
+  const { cellW } = { cellW: cellRect({ col: 0, row: 0, colSpan: 1, rowSpan: 1 }, G32).w };
+  const stride = cellW + G32.gutter;
+  assert.deepEqual(dragPlacement(w, stride, 0, G32), { col: 1, row: 0, colSpan: 1, rowSpan: 1 });
+});
+
+test("dragPlacement: a sub-half-cell nudge does not move the widget", () => {
+  const w = { id: "a", col: 1, row: 0, colSpan: 1, rowSpan: 1 };
+  assert.deepEqual(dragPlacement(w, 8, 6, G32), { col: 1, row: 0, colSpan: 1, rowSpan: 1 });
+});
+
+test("dragPlacement: a drag past the edge clamps, keeping the span in bounds", () => {
+  const w = { id: "a", col: 0, row: 0, colSpan: 2, rowSpan: 1 };
+  const far = dragPlacement(w, 100000, 100000, G32);
+  // cols=3, colSpan=2 -> furthest legal col is 1; rows=2, rowSpan=1 -> row 1.
+  assert.deepEqual(far, { col: 1, row: 1, colSpan: 2, rowSpan: 1 });
+  assert.ok(canPlace([w], G32, "a", far), "clamped placement is legal");
+});
+
+test("dragPlacement: span is preserved across a move", () => {
+  const w = { id: "a", col: 0, row: 0, colSpan: 3, rowSpan: 1 };
+  const moved = dragPlacement(w, 0, 400, G32);
+  assert.equal(moved.colSpan, 3);
+  assert.equal(moved.rowSpan, 1);
+  assert.equal(moved.col, 0, "a full-width tile cannot shift sideways");
+});
+
+test("resizePlacement: dragging the corner out one cell grows the span", () => {
+  const w = { id: "a", col: 0, row: 0, colSpan: 1, rowSpan: 1 };
+  const r = cellRect(w, G32);
+  const grown = resizePlacement(w, r.w + G32.gutter, 0, G32);
+  assert.deepEqual(grown, { col: 0, row: 0, colSpan: 2, rowSpan: 1 });
+});
+
+test("resizePlacement: shrinking below one cell floors at 1x1", () => {
+  const w = { id: "a", col: 0, row: 0, colSpan: 2, rowSpan: 2 };
+  assert.deepEqual(resizePlacement(w, -100000, -100000, G32), {
+    col: 0,
+    row: 0,
+    colSpan: 1,
+    rowSpan: 1,
+  });
+});
+
+test("resizePlacement: growth is capped at the grid edge and never moves the origin", () => {
+  const w = { id: "a", col: 1, row: 0, colSpan: 1, rowSpan: 1 };
+  const big = resizePlacement(w, 100000, 100000, G32);
+  assert.equal(big.col, 1, "origin fixed");
+  assert.equal(big.row, 0, "origin fixed");
+  assert.equal(big.colSpan, 2, "cols=3 from col 1 -> max span 2");
+  assert.equal(big.rowSpan, 2, "rows=2 from row 0 -> max span 2");
+  assert.ok(canPlace([w], G32, "a", big), "capped placement is legal");
+});
+
+test("gestures: an illegal drop is caught by canPlace, leaving the caller to revert", () => {
+  const widgets = [
+    { id: "a", col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+    { id: "b", col: 1, row: 0, colSpan: 1, rowSpan: 1 },
+  ];
+  const r = cellRect(widgets[0], G32);
+  const onto = dragPlacement(widgets[0], r.w + G32.gutter, 0, G32); // straight onto "b"
+  assert.deepEqual(onto, { col: 1, row: 0, colSpan: 1, rowSpan: 1 });
+  assert.equal(canPlace(widgets, G32, "a", onto), false, "drop must be refused");
 });
 
 test("migrateSpacesState: v1 pixel state converts without losing widgets or scripts", () => {

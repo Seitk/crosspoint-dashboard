@@ -10,6 +10,8 @@ import {
   renderDashboardToFrameBytes,
 } from "./render";
 import { applyScriptResult, proxiedFetch, runScript } from "./scripts";
+import TileOverlay, { useCanvasScale } from "./TileOverlay";
+import WidgetPopover from "./WidgetPopover";
 import {
   canPlace,
   layoutSpace,
@@ -106,8 +108,12 @@ export default function DashboardBuilder() {
   /** Transient note when a grid change had to relocate widgets. */
   const [gridNote, setGridNote] = useState("");
   const importRef = useRef<HTMLInputElement | null>(null);
+  /** Widget whose edit popover is open (clicked on the canvas). */
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const active = spaces[activeIndex] ?? spaces[0];
+  const scale = useCanvasScale(canvasRef);
+  const selected = active?.widgets.find((w) => w.id === selectedId) ?? null;
 
   // Restore saved spaces (migrating older schemas) + device IP.
   useEffect(() => {
@@ -448,12 +454,40 @@ export default function DashboardBuilder() {
       </header>
 
       <section className={styles.canvasWrap}>
-        <canvas
-          ref={canvasRef}
-          width={DASHBOARD_WIDTH}
-          height={DASHBOARD_HEIGHT}
-          className={styles.canvas}
-        />
+        <div className={styles.stage}>
+          <canvas
+            ref={canvasRef}
+            width={DASHBOARD_WIDTH}
+            height={DASHBOARD_HEIGHT}
+            className={styles.canvas}
+          />
+          {active && (
+            <TileOverlay
+              widgets={active.widgets}
+              grid={active.grid}
+              scale={scale}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onPlace={placeWidget}
+            />
+          )}
+          {active && selected && (
+            <WidgetPopover
+              widget={selected}
+              grid={active.grid}
+              siblings={active.widgets}
+              scale={scale}
+              error={scriptErrors[selected.id]}
+              onChange={(patch) => patchWidget(selected.id, patch as WidgetPatch)}
+              onPlace={(placement) => placeWidget(selected.id, placement)}
+              onRemove={() => {
+                removeWidget(selected.id);
+                setSelectedId(null);
+              }}
+              onClose={() => setSelectedId(null)}
+            />
+          )}
+        </div>
         <div className={styles.canvasBar}>
           <label className={styles.row} style={{ gap: 6 }}>
             <input
@@ -653,20 +687,16 @@ export default function DashboardBuilder() {
               + Text
             </button>
           </div>
-          <div style={{ marginTop: 12 }}>
-            {active?.widgets.map((w) => (
-              <WidgetEditor
-                key={w.id}
-                widget={w}
-                grid={active.grid}
-                siblings={active.widgets}
-                error={scriptErrors[w.id]}
-                onChange={(patch) => patchWidget(w.id, patch)}
-                onPlace={(placement) => placeWidget(w.id, placement)}
-                onRemove={() => removeWidget(w.id)}
-              />
-            ))}
-          </div>
+          <p className={styles.status} style={{ color: "#888" }}>
+            Drag a tile on the preview to move it, drag its corner to resize, or click
+            it to edit. Arrow keys nudge a focused tile by one cell.
+          </p>
+          {Object.keys(scriptErrors).length > 0 && (
+            <p className={styles.scriptError}>
+              ⚠ {Object.keys(scriptErrors).length} widget script(s) failed — click the
+              tile to see the error.
+            </p>
+          )}
         </section>
       </div>
     </main>
@@ -677,235 +707,6 @@ function pushError(err: unknown): string {
   return err instanceof Error
     ? `${err.message}. Check: "npm run dev" is running, the Device IP matches the X3's screen, and both are on the same Wi-Fi.`
     : "Push failed.";
-}
-
-/**
- * Click-to-place grid map. Cells occupied by other widgets are disabled, so a
- * collision can't be expressed — the invariant is enforced at the input, not
- * patched up afterwards.
- */
-function CellPicker({
-  widget,
-  grid,
-  siblings,
-  onPlace,
-}: {
-  widget: Widget;
-  grid: GridSpec;
-  siblings: Widget[];
-  onPlace: (placement: Placement) => void;
-}) {
-  const taken = occupancy(siblings, widget.id) as Map<string, string>;
-  const self = { col: widget.col, row: widget.row, colSpan: widget.colSpan, rowSpan: widget.rowSpan };
-  // Title by display name, not id: widget ids come from a counter that differs
-  // between the SSR and client render, and putting one in an attribute makes
-  // React report a hydration mismatch. Names are stable and read better anyway.
-  const nameOf = new Map(siblings.map((w) => [w.id, describe(w)]));
-
-  const move = (col: number, row: number) => {
-    // Keep the current span if it still fits; otherwise fall back to 1x1.
-    const keep = { col, row, colSpan: self.colSpan, rowSpan: self.rowSpan };
-    if (canPlace(siblings, grid, widget.id, keep)) return onPlace(keep);
-    onPlace({ col, row, colSpan: 1, rowSpan: 1 });
-  };
-
-  const setSpan = (colSpan: number, rowSpan: number) => {
-    const next = { col: self.col, row: self.row, colSpan, rowSpan };
-    if (colSpan >= 1 && rowSpan >= 1 && canPlace(siblings, grid, widget.id, next)) onPlace(next);
-  };
-
-  const rows = [];
-  for (let row = 0; row < grid.rows; row++) {
-    const cells = [];
-    for (let col = 0; col < grid.cols; col++) {
-      const isSelf =
-        col >= self.col && col < self.col + self.colSpan &&
-        row >= self.row && row < self.row + self.rowSpan;
-      const takenBy = taken.get(`${col},${row}`);
-      const state = isSelf ? "self" : takenBy ? "taken" : "free";
-      cells.push(
-        <button
-          key={col}
-          type="button"
-          className={styles.cell}
-          data-state={state}
-          disabled={state === "taken"}
-          aria-label={`cell ${col},${row}${state === "taken" ? " (occupied)" : ""}`}
-          title={
-            state === "taken"
-              ? `occupied by ${nameOf.get(takenBy ?? "") ?? "another widget"}`
-              : `move to ${col},${row}`
-          }
-          onClick={() => move(col, row)}
-        />,
-      );
-    }
-    rows.push(
-      <div key={row} className={styles.cellRow}>
-        {cells}
-      </div>,
-    );
-  }
-
-  return (
-    <div className={styles.picker}>
-      <div className={styles.cellGrid}>{rows}</div>
-      <div className={styles.spanControls}>
-        <label>
-          Span W
-          <input
-            type="number"
-            min={1}
-            max={grid.cols}
-            value={self.colSpan}
-            onChange={(e) => setSpan(Math.max(1, Number(e.target.value) || 1), self.rowSpan)}
-          />
-        </label>
-        <label>
-          Span H
-          <input
-            type="number"
-            min={1}
-            max={grid.rows}
-            value={self.rowSpan}
-            onChange={(e) => setSpan(self.colSpan, Math.max(1, Number(e.target.value) || 1))}
-          />
-        </label>
-        <span className={styles.cellHint}>
-          cell {self.col},{self.row}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function WidgetEditor({
-  widget,
-  grid,
-  siblings,
-  error,
-  onChange,
-  onPlace,
-  onRemove,
-}: {
-  widget: Widget;
-  grid: GridSpec;
-  siblings: Widget[];
-  error?: string;
-  onChange: (patch: WidgetPatch) => void;
-  onPlace: (placement: Placement) => void;
-  onRemove: () => void;
-}) {
-  const num = (v: string) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-  };
-
-  return (
-    <div className={styles.widget}>
-      <div className={styles.widgetHead}>
-        <span className={styles.tag}>{widget.type}</span>
-        <button className={styles.remove} onClick={onRemove}>
-          remove
-        </button>
-      </div>
-
-      <div className={styles.fields}>
-        {widget.type === "metric" && (
-          <>
-            <input
-              aria-label="label"
-              placeholder="Label"
-              value={widget.label}
-              onChange={(e) => onChange({ label: e.target.value })}
-            />
-            <input
-              aria-label="value"
-              placeholder="Value"
-              value={widget.value}
-              onChange={(e) => onChange({ value: e.target.value })}
-            />
-            <input
-              aria-label="delta"
-              placeholder="Delta (optional)"
-              value={widget.delta ?? ""}
-              onChange={(e) => onChange({ delta: e.target.value })}
-            />
-          </>
-        )}
-
-        {widget.type === "list" && (
-          <>
-            <input
-              aria-label="title"
-              placeholder="Title"
-              value={widget.title}
-              onChange={(e) => onChange({ title: e.target.value })}
-            />
-            <textarea
-              aria-label="items"
-              placeholder="One item per line"
-              value={widget.items.join("\n")}
-              onChange={(e) => onChange({ items: e.target.value.split("\n") })}
-            />
-          </>
-        )}
-
-        {widget.type === "text" && (
-          <>
-            <textarea
-              aria-label="text"
-              placeholder="Text (newlines allowed)"
-              value={widget.text}
-              onChange={(e) => onChange({ text: e.target.value })}
-            />
-            <div className={styles.row}>
-              <label className="field grow">
-                Size
-                <input
-                  type="number"
-                  value={widget.size ?? 28}
-                  onChange={(e) => onChange({ size: num(e.target.value) })}
-                />
-              </label>
-              <label className="field grow">
-                Align
-                <select
-                  value={widget.align ?? "left"}
-                  onChange={(e) => onChange({ align: e.target.value as "left" | "center" })}
-                >
-                  <option value="left">left</option>
-                  <option value="center">center</option>
-                </select>
-              </label>
-            </div>
-          </>
-        )}
-
-        <label className="field">
-          Data script (JS, optional)
-          <textarea
-            aria-label="script"
-            className={styles.script}
-            placeholder={"const r = await fetch('https://api…');\nreturn (await r.json()).price;"}
-            value={widget.script ?? ""}
-            onChange={(e) => onChange({ script: e.target.value })}
-            spellCheck={false}
-          />
-        </label>
-        {error && <p className={styles.scriptError}>⚠ {error}</p>}
-
-        <CellPicker widget={widget} grid={grid} siblings={siblings} onPlace={onPlace} />
-      </div>
-    </div>
-  );
-}
-
-/** Human-readable name for a widget, for tooltips. Never its id (see CellPicker). */
-function describe(w: Widget): string {
-  if (w.type === "metric") return w.label || "metric";
-  if (w.type === "list") return w.title || "list";
-  return (w.text || "text").split("\n")[0];
 }
 
 /** Place a new widget in the first free cell, so adding never causes an overlap. */
