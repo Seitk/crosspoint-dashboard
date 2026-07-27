@@ -572,8 +572,8 @@ export default function DashboardBuilder() {
           </div>
           {gridNote && <p className={styles.scriptError}>{gridNote}</p>}
           <p className={styles.status} style={{ color: "#888" }}>
-            Tiles are placed on this grid, so they can never overlap. Pick a cell in each
-            widget below to move it.
+            Tiles are placed on this grid, so they can never overlap. Drag a tile on the
+            preview to move it.
           </p>
         </section>
 
