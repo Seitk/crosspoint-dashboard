@@ -105,7 +105,7 @@ export function nextId(prefix = "w"): string {
 
 /** Grid a brand-new space starts on. */
 export function defaultGrid(): GridSpec {
-  return { cols: 2, rows: 2, margin: 16, gutter: 12 };
+  return { cols: 12, rows: 6, margin: 16, gutter: 12 };
 }
 
 /** An empty space, ready for widgets. */
@@ -118,7 +118,10 @@ export function defaultSpaces(): Space[] {
   return [{ id: nextId("s"), name: "Space 1", grid: defaultGrid(), widgets: defaultWidgets() }];
 }
 
-/** Starter widgets so the builder isn't empty on first load — one per cell of a 2x2. */
+/**
+ * Starter widgets so the builder isn't empty on first load. Four 6x3 quadrants of
+ * the 12x6 grid — the same four panes as before, now expressed on the finer grid.
+ */
 export function defaultWidgets(): Widget[] {
   return [
     {
@@ -126,8 +129,8 @@ export function defaultWidgets(): Widget[] {
       type: "metric",
       col: 0,
       row: 0,
-      colSpan: 1,
-      rowSpan: 1,
+      colSpan: 6,
+      rowSpan: 3,
       label: "AAPL",
       value: "229.35",
       delta: "+1.24%",
@@ -135,10 +138,10 @@ export function defaultWidgets(): Widget[] {
     {
       id: nextId(),
       type: "metric",
-      col: 1,
+      col: 6,
       row: 0,
-      colSpan: 1,
-      rowSpan: 1,
+      colSpan: 6,
+      rowSpan: 3,
       label: "Claude usage",
       value: "68%",
       delta: "resets 4:00pm",
@@ -147,19 +150,19 @@ export function defaultWidgets(): Widget[] {
       id: nextId(),
       type: "list",
       col: 0,
-      row: 1,
-      colSpan: 1,
-      rowSpan: 1,
+      row: 3,
+      colSpan: 6,
+      rowSpan: 3,
       title: "TODO",
       items: ["Ship the X3 fork", "Wire up live metrics", "Dock + power test"],
     },
     {
       id: nextId(),
       type: "text",
-      col: 1,
-      row: 1,
-      colSpan: 1,
-      rowSpan: 1,
+      col: 6,
+      row: 3,
+      colSpan: 6,
+      rowSpan: 3,
       text: "CROSSPOINT\nDASHBOARD",
       size: 40,
       align: "center",

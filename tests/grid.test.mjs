@@ -6,8 +6,11 @@ import {
   canPlace,
   cellRect,
   clampPlacement,
+  defaultSpan,
   dragPlacement,
+  firstFreePlacement,
   inferGrid,
+  isValidGrid,
   layoutSpace,
   migrateSpacesState,
   pointToCell,
@@ -145,6 +148,77 @@ test("inferGrid: distinct pixel origins become columns and rows", () => {
   ]);
   assert.equal(grid.cols, 2);
   assert.equal(grid.rows, 2);
+});
+
+// ---- grid density -----------------------------------------------------------
+
+test("the default 12x6 grid is drawable and every cell is disjoint", () => {
+  const grid = { cols: 12, rows: 6, margin: 16, gutter: 12 };
+  assert.equal(isValidGrid(grid), true);
+  const widgets = [];
+  for (let row = 0; row < 6; row++) {
+    for (let col = 0; col < 12; col++) {
+      widgets.push({ id: `w${col}-${row}`, type: "metric", col, row, colSpan: 1, rowSpan: 1 });
+    }
+  }
+  const dash = layoutSpace({ grid, widgets });
+  assert.equal(dash.widgets.length, 72);
+  assert.ok(validate(dash.widgets).ok, "72 cells must not overlap");
+  assert.ok(dash.widgets.every((w) => w.w > 0 && w.h > 0), "every cell has pixels");
+});
+
+test("isValidGrid rejects a grid whose margin/gutter leave no room for a cell", () => {
+  // 12 rows with a 48px gutter overruns the 528px canvas: cellH goes negative.
+  assert.equal(isValidGrid({ cols: 12, rows: 12, margin: 16, gutter: 48 }), false);
+  assert.equal(isValidGrid({ cols: 12, rows: 12, margin: 64, gutter: 48 }), false);
+  assert.equal(isValidGrid({ cols: 12, rows: 12, margin: 64, gutter: 12 }), true);
+});
+
+test("defaultSpan scales a new widget with the grid", () => {
+  assert.deepEqual(defaultSpan({ cols: 12, rows: 6 }), { colSpan: 4, rowSpan: 2 });
+  assert.deepEqual(defaultSpan({ cols: 2, rows: 2 }), { colSpan: 1, rowSpan: 1 });
+  assert.deepEqual(defaultSpan({ cols: 3, rows: 2 }), { colSpan: 1, rowSpan: 1 });
+  assert.deepEqual(defaultSpan({ cols: 1, rows: 1 }), { colSpan: 1, rowSpan: 1 });
+});
+
+test("firstFreePlacement finds a free block and never returns an overlap", () => {
+  const grid = { cols: 12, rows: 6, margin: 16, gutter: 12 };
+  const widgets = [];
+  // Fill the top-left 8x4 with 4x4 blocks, then ask for another 4x4.
+  for (const [col, row] of [[0, 0], [4, 0]]) {
+    widgets.push({ id: `w${col}`, col, row, colSpan: 4, rowSpan: 4 });
+  }
+  const spot = firstFreePlacement(widgets, grid, 4, 4);
+  assert.deepEqual(spot, { col: 8, row: 0, colSpan: 4, rowSpan: 4 });
+  assert.ok(canPlace(widgets, grid, "new", spot), "returned block is free");
+});
+
+test("firstFreePlacement returns null when the grid is completely full", () => {
+  // The four starter quadrants cover every cell of the default 12x6 grid, so
+  // adding a widget must be refused rather than placed on top of another.
+  const grid = { cols: 12, rows: 6, margin: 16, gutter: 12 };
+  const widgets = [
+    { id: "a", col: 0, row: 0, colSpan: 6, rowSpan: 3 },
+    { id: "b", col: 6, row: 0, colSpan: 6, rowSpan: 3 },
+    { id: "c", col: 0, row: 3, colSpan: 6, rowSpan: 3 },
+    { id: "d", col: 6, row: 3, colSpan: 6, rowSpan: 3 },
+  ];
+  assert.ok(layoutSpace({ grid, widgets }), "the four quadrants themselves are valid");
+  assert.equal(firstFreePlacement(widgets, grid, 4, 2), null);
+  assert.equal(firstFreePlacement(widgets, grid, 1, 1), null);
+});
+
+test("firstFreePlacement falls back to a single cell when no block fits", () => {
+  const grid = { cols: 2, rows: 2, margin: 16, gutter: 12 };
+  const widgets = [
+    { id: "a", col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+    { id: "b", col: 1, row: 0, colSpan: 1, rowSpan: 1 },
+    { id: "c", col: 0, row: 1, colSpan: 1, rowSpan: 1 },
+  ];
+  // A 2x2 block cannot fit, but cell (1,1) is still free.
+  const spot = firstFreePlacement(widgets, grid, 2, 2);
+  assert.deepEqual(spot, { col: 1, row: 1, colSpan: 1, rowSpan: 1 });
+  assert.ok(canPlace(widgets, grid, "new", spot));
 });
 
 // ---- pointer gestures -------------------------------------------------------

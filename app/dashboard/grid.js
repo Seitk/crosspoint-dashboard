@@ -14,8 +14,13 @@
 /** X3 e-ink geometry (landscape blit). Verified against firmware @ 1.4.1. */
 export const CANVAS = { width: 792, height: 528 };
 
-/** Starting grid for a new space. Few big tiles — e-ink text needs to be large. */
-export const DEFAULT_GRID = { cols: 2, rows: 2, margin: 16, gutter: 12 };
+/**
+ * Starting grid for a new space: 12 columns by 6 rows. Fine enough to position
+ * tiles precisely, while a cell stays ~52x73px on the 792x528 panel — tall enough
+ * that a few stacked cells hold e-ink text at a legible size. Widgets are expected
+ * to span several cells rather than occupy single ones.
+ */
+export const DEFAULT_GRID = { cols: 12, rows: 6, margin: 16, gutter: 12 };
 
 /** Pixel size of one cell, plus the stride between cell origins. */
 export function cellMetrics(grid, canvas = CANVAS) {
@@ -184,6 +189,45 @@ export function refitToGrid(widgets, grid) {
     out.push({ ...w, ...placement });
   }
   return { widgets: out, moved };
+}
+
+/**
+ * Whether a grid is drawable at all. A dense grid combined with a big margin or
+ * gutter can leave a cell with no pixels; cellMetrics() throws on that, and it is
+ * called during render, so the UI must check before accepting a new grid.
+ */
+export function isValidGrid(grid, canvas = CANVAS) {
+  try {
+    cellMetrics(grid, canvas);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A sensible starting size for a new widget: roughly a third of the grid in each
+ * direction. On a coarse 2x2 this is 1x1 as before; on the default 12x6 it is
+ * 4x2, which is legible on e-ink instead of a single ~52x73px cell.
+ */
+export function defaultSpan(grid) {
+  const { cols, rows } = { ...DEFAULT_GRID, ...grid };
+  return {
+    colSpan: clamp(Math.round(cols / 3), 1, cols),
+    rowSpan: clamp(Math.round(rows / 3), 1, rows),
+  };
+}
+
+/**
+ * First free block of the requested span, scanning row-major, falling back to a
+ * single free cell. Returns **null** when the grid is genuinely full — callers
+ * must refuse to add rather than place an overlapping widget (a full grid is
+ * easy to reach: four quadrant tiles cover every cell).
+ */
+export function firstFreePlacement(widgets, grid, colSpan = 1, rowSpan = 1) {
+  const { cols, rows } = { ...DEFAULT_GRID, ...grid };
+  const taken = occupancy(widgets);
+  return firstFree(taken, cols, rows, colSpan, rowSpan) ?? firstFree(taken, cols, rows, 1, 1);
 }
 
 /** Scan row-major for a free block of the requested span. */

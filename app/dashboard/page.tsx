@@ -14,9 +14,11 @@ import TileOverlay, { useCanvasScale } from "./TileOverlay";
 import WidgetPopover from "./WidgetPopover";
 import {
   canPlace,
+  defaultSpan,
+  firstFreePlacement,
+  isValidGrid,
   layoutSpace,
   migrateSpacesState,
-  occupancy,
   refitToGrid,
 } from "./grid.js";
 import {
@@ -62,9 +64,21 @@ function safeLayout(space: Space): Dashboard {
   try {
     return layoutSpace(space) as Dashboard;
   } catch {
+    /* fall through to a refit */
+  }
+  try {
     const { widgets } = refitToGrid(space.widgets, space.grid);
     return layoutSpace({ ...space, widgets }) as Dashboard;
+  } catch {
+    /* refit can still fail on a full grid — fall through */
   }
+  // Last resort: keep only what provably fits. This cannot throw, so a bad state
+  // can never take the whole editor down (it previously did, via the render effect).
+  const kept: Widget[] = [];
+  for (const w of space.widgets) {
+    if (canPlace(kept, space.grid, w.id, w)) kept.push(w);
+  }
+  return layoutSpace({ ...space, widgets: kept }) as Dashboard;
 }
 
 /** Run every scripted widget in a list; returns updated widgets + per-id errors. */
@@ -212,8 +226,16 @@ export default function DashboardBuilder() {
   );
 
   const addWidget = useCallback(
-    (type: WidgetType) =>
-      updateActiveWidgets((ws) => [...ws, makeWidget(type, ws, active?.grid ?? defaultGrid())]),
+    (type: WidgetType) => {
+      const grid = active?.grid ?? defaultGrid();
+      const widget = makeWidget(type, active?.widgets ?? [], grid);
+      // A full grid must refuse rather than stack a widget on top of another.
+      if (!widget) {
+        setStatus("No free space on this grid — enlarge the grid or remove a widget first.");
+        return;
+      }
+      updateActiveWidgets((ws) => [...ws, widget]);
+    },
     [updateActiveWidgets, active],
   );
 
@@ -226,8 +248,13 @@ export default function DashboardBuilder() {
         sp.map((s, i) => {
           if (i !== activeIndex) return s;
           const grid = { ...s.grid, ...patch };
-          // Guard against a grid so dense that a cell has no pixels left.
+          // Reject a grid so dense that a cell has no pixels left: cellRect() is
+          // called during render, and it throws on one, which would blank the page.
           if (grid.cols < 1 || grid.rows < 1 || grid.margin < 0 || grid.gutter < 0) return s;
+          if (!isValidGrid(grid)) {
+            setGridNote("That grid leaves no room for a cell — reduce the margin or gutter.");
+            return s;
+          }
           const { widgets, moved } = refitToGrid(s.widgets, grid);
           setGridNote(
             moved.length
@@ -549,8 +576,8 @@ export default function DashboardBuilder() {
           <div className={styles.gridControls}>
             {(
               [
-                ["cols", "Cols", 1, 8],
-                ["rows", "Rows", 1, 6],
+                ["cols", "Cols", 1, 12],
+                ["rows", "Rows", 1, 12],
                 ["margin", "Margin", 0, 64],
                 ["gutter", "Gutter", 0, 48],
               ] as const
@@ -709,18 +736,16 @@ function pushError(err: unknown): string {
     : "Push failed.";
 }
 
-/** Place a new widget in the first free cell, so adding never causes an overlap. */
-function makeWidget(type: WidgetType, existing: Widget[], grid: GridSpec): Widget {
-  const taken = occupancy(existing) as Map<string, string>;
-  let spot = { col: 0, row: 0, colSpan: 1, rowSpan: 1 };
-  outer: for (let row = 0; row < grid.rows; row++) {
-    for (let col = 0; col < grid.cols; col++) {
-      if (!taken.has(`${col},${row}`)) {
-        spot = { col, row, colSpan: 1, rowSpan: 1 };
-        break outer;
-      }
-    }
-  }
+/**
+ * Place a new widget in the first free block, or return null when the grid is
+ * full. Its size scales with the grid: a 1x1 tile on the default 12x6 grid is
+ * only ~52x73px, too small for a metric's 60px value, so defaultSpan() gives it
+ * roughly a third of the grid instead.
+ */
+function makeWidget(type: WidgetType, existing: Widget[], grid: GridSpec): Widget | null {
+  const { colSpan, rowSpan } = defaultSpan(grid) as { colSpan: number; rowSpan: number };
+  const spot = firstFreePlacement(existing, grid, colSpan, rowSpan) as Placement | null;
+  if (!spot) return null;
   const base = { id: nextId(), ...spot };
   if (type === "metric") {
     return { ...base, type, label: "Label", value: "0", delta: "" };
