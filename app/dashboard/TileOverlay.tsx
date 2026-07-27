@@ -17,6 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 
 import styles from "./dashboard.module.css";
 import { canPlace, cellRect, dragPlacement, resizePlacement } from "./grid.js";
+import { fieldAt, fieldLayout } from "./fields.js";
 import { DASHBOARD_WIDTH, type GridSpec, type Placement, type Widget } from "./types";
 
 /** Pointer travel (in canvas px) below which a gesture counts as a click, not a drag. */
@@ -61,21 +62,37 @@ export function useCanvasScale(canvasRef: React.RefObject<HTMLCanvasElement | nu
   return scale;
 }
 
+type FieldBox = { key: string; x: number; y: number; w: number; h: number };
+
 export default function TileOverlay({
   widgets,
   grid,
   scale,
   selectedId,
+  selectedField,
   onSelect,
+  onSelectField,
   onPlace,
 }: {
   widgets: Widget[];
   grid: GridSpec;
   scale: number;
   selectedId: string | null;
+  selectedField: string | null;
   onSelect: (id: string | null) => void;
+  onSelectField: (id: string, field: string) => void;
   onPlace: (id: string, placement: Placement) => void;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  /** Which field the pointer is over, so it can be highlighted before a click. */
+  const [hover, setHover] = useState<{ id: string; key: string } | null>(null);
+
+  /** Pointer position in canvas pixels — the space fields.js works in. */
+  const toCanvas = (e: { clientX: number; clientY: number }) => {
+    const box = rootRef.current?.getBoundingClientRect();
+    if (!box) return null;
+    return { x: (e.clientX - box.left) / scale, y: (e.clientY - box.top) / scale };
+  };
   // The gesture lives in a ref *and* in state: the ref is the source of truth so
   // several pointer events in one frame each see the latest value (reading state
   // here would give the value from the last render, dropping the whole gesture);
@@ -119,6 +136,7 @@ export default function TileOverlay({
   const move = (e: React.PointerEvent) => {
     const g = gestureRef.current;
     if (!g) return;
+    setHover(null); // dragging: field highlights would just be noise
     // Convert screen movement back into canvas pixels before it reaches grid.js.
     const dx = (e.clientX - g.clientX) / scale;
     const dy = (e.clientY - g.clientY) / scale;
@@ -136,7 +154,13 @@ export default function TileOverlay({
     }
 
     if (!g.moved) {
-      onSelect(w.id); // a tap, not a drag: open the editor
+      // A tap. If it landed on one of the widget's fields, edit that field;
+      // otherwise fall back to the widget-level editor.
+      const point = toCanvas(e);
+      const rect = cellRect(w, grid) as { x: number; y: number; w: number; h: number };
+      const field = point ? (fieldAt(w, rect, point) as FieldBox | null) : null;
+      if (field) onSelectField(w.id, field.key);
+      else onSelect(w.id);
       return;
     }
     const placement =
@@ -177,7 +201,11 @@ export default function TileOverlay({
   }, [gesture]);
 
   return (
-    <div className={styles.overlay} data-dragging={gesture?.moved ? "yes" : "no"}>
+    <div
+      ref={rootRef}
+      className={styles.overlay}
+      data-dragging={gesture?.moved ? "yes" : "no"}
+    >
       {widgets.map((w) => {
         const placement = previewOf(w);
         const r = cellRect(placement, grid) as { x: number; y: number; w: number; h: number };
@@ -199,12 +227,37 @@ export default function TileOverlay({
             }}
             aria-label={`${tileLabel(w)} — ${w.type} at cell ${w.col},${w.row}`}
             onPointerDown={start(w, "move")}
-            onPointerMove={move}
+            onPointerMove={(e) => {
+              move(e);
+              if (gestureRef.current) return;
+              const point = toCanvas(e);
+              const f = point ? (fieldAt(w, r, point) as FieldBox | null) : null;
+              setHover(f ? { id: w.id, key: f.key } : null);
+            }}
+            onPointerLeave={() => setHover(null)}
             onPointerUp={end(w)}
             onPointerCancel={() => setBoth(null)}
             onKeyDown={onKeyDown(w)}
           >
             <span className={styles.tileName}>{tileLabel(w)}</span>
+            {/* Field outlines. Purely visual: pointer-events are off so the tile
+                keeps a single gesture stream and drag still works over them. */}
+            {(hover?.id === w.id || selectedId === w.id) &&
+              (fieldLayout(w, r) as FieldBox[]).map((f) => (
+                <span
+                  key={f.key}
+                  className={styles.fieldBox}
+                  data-field={f.key}
+                  data-hot={hover?.id === w.id && hover.key === f.key ? "yes" : "no"}
+                  data-selected={selectedId === w.id && selectedField === f.key ? "yes" : "no"}
+                  style={{
+                    left: (f.x - r.x) * scale,
+                    top: (f.y - r.y) * scale,
+                    width: f.w * scale,
+                    height: f.h * scale,
+                  }}
+                />
+              ))}
             <span
               className={styles.resizeHandle}
               role="presentation"

@@ -2,16 +2,9 @@
 // 1-bit PNG ready to push to the X3. Kept separate from monochrome.js (which is
 // pure/DOM-free) so the pixel logic stays unit-testable in node.
 
-import type {
-  Dashboard,
-  PlacedListWidget,
-  PlacedMetricWidget,
-  PlacedTextWidget,
-  PlacedWidget,
-} from "./types";
+import type { Dashboard, PlacedWidget } from "./types";
+import { anchorX, fieldLayout } from "./fields.js";
 import { packMonoToBits, thresholdRgbaToMono } from "./monochrome.js";
-
-const PAD = 14;
 
 export function drawDashboard(ctx: CanvasRenderingContext2D, dash: Dashboard): void {
   ctx.fillStyle = "#ffffff";
@@ -22,64 +15,68 @@ export function drawDashboard(ctx: CanvasRenderingContext2D, dash: Dashboard): v
   for (const widget of dash.widgets) drawWidget(ctx, widget);
 }
 
+/**
+ * Draw a widget from its computed field boxes. Positions and sizes are decided by
+ * fields.js — the same module the editor overlay hit-tests against — so what you
+ * click is exactly what was drawn, and no field can spill outside its tile.
+ */
 function drawWidget(ctx: CanvasRenderingContext2D, widget: PlacedWidget): void {
   ctx.lineWidth = 2;
   ctx.strokeRect(widget.x + 1, widget.y + 1, widget.w - 2, widget.h - 2);
-  switch (widget.type) {
-    case "metric":
-      drawMetric(ctx, widget);
-      break;
-    case "list":
-      drawList(ctx, widget);
-      break;
-    case "text":
-      drawText(ctx, widget);
-      break;
+  for (const field of fieldLayout(widget, widget) as FieldBox[]) {
+    drawField(ctx, field);
   }
 }
 
-function drawMetric(ctx: CanvasRenderingContext2D, w: PlacedMetricWidget): void {
-  ctx.textAlign = "left";
-  ctx.font = "600 20px sans-serif";
-  ctx.fillText(clip(ctx, w.label.toUpperCase(), w.w - PAD * 2), w.x + PAD, w.y + PAD);
-  ctx.font = "700 60px sans-serif";
-  ctx.fillText(clip(ctx, w.value, w.w - PAD * 2), w.x + PAD, w.y + PAD + 30);
-  if (w.delta) {
-    ctx.font = "500 22px sans-serif";
-    ctx.fillText(clip(ctx, w.delta, w.w - PAD * 2), w.x + PAD, w.y + w.h - PAD - 24);
-  }
-}
+/** One resolved field box from fields.js. */
+type FieldBox = {
+  key: string;
+  text: string | string[];
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  size: number;
+  align: CanvasTextAlign;
+  weight: number;
+  upper: boolean;
+  multiline: boolean;
+  middle: boolean;
+  rule: boolean;
+  lineHeight: number;
+  maxLines: number;
+};
 
-function drawList(ctx: CanvasRenderingContext2D, w: PlacedListWidget): void {
-  ctx.textAlign = "left";
-  ctx.font = "700 22px sans-serif";
-  ctx.fillText(clip(ctx, w.title.toUpperCase(), w.w - PAD * 2), w.x + PAD, w.y + PAD);
-  ctx.beginPath();
-  ctx.moveTo(w.x + PAD, w.y + PAD + 30);
-  ctx.lineTo(w.x + w.w - PAD, w.y + PAD + 30);
-  ctx.stroke();
-  ctx.font = "400 22px sans-serif";
-  const lineH = 32;
-  let y = w.y + PAD + 44;
-  for (const item of w.items) {
-    if (y + lineH > w.y + w.h - PAD) break;
-    ctx.fillText(clip(ctx, `• ${item}`, w.w - PAD * 2), w.x + PAD, y);
-    y += lineH;
-  }
-}
+function drawField(ctx: CanvasRenderingContext2D, f: FieldBox): void {
+  ctx.font = `${f.weight} ${f.size}px sans-serif`;
+  ctx.textAlign = f.align;
+  const x = anchorX(f) as number;
 
-function drawText(ctx: CanvasRenderingContext2D, w: PlacedTextWidget): void {
-  const size = w.size ?? 28;
-  ctx.font = `600 ${size}px sans-serif`;
-  const align = w.align ?? "left";
-  ctx.textAlign = align;
-  const cx = align === "center" ? w.x + w.w / 2 : w.x + PAD;
-  const lines = w.text.split("\n");
-  const lineH = size * 1.25;
-  let y = w.y + w.h / 2 - (lines.length * lineH) / 2;
-  for (const line of lines) {
-    ctx.fillText(clip(ctx, line, w.w - PAD * 2), cx, y);
-    y += lineH;
+  if (f.multiline) {
+    // List items get a bullet; a text block splits on newlines. Either way only
+    // the lines that fit are drawn — maxLines comes from the box height.
+    const lines = Array.isArray(f.text)
+      ? f.text.map((item) => `• ${item}`)
+      : String(f.text).split("\n");
+    const shown = lines.slice(0, f.maxLines);
+    let y = f.middle ? f.y + f.h / 2 - (shown.length * f.lineHeight) / 2 : f.y;
+    for (const line of shown) {
+      ctx.fillText(clip(ctx, line, f.w), x, y);
+      y += f.lineHeight;
+    }
+    return;
+  }
+
+  const text = f.upper ? String(f.text).toUpperCase() : String(f.text);
+  if (text) ctx.fillText(clip(ctx, text, f.w), x, f.y);
+
+  // The list title carries a rule along the bottom of its box.
+  if (f.rule) {
+    const ruleY = Math.round(f.y + f.h - 2);
+    ctx.beginPath();
+    ctx.moveTo(f.x, ruleY);
+    ctx.lineTo(f.x + f.w, ruleY);
+    ctx.stroke();
   }
 }
 

@@ -11,7 +11,7 @@ export const DASHBOARD_WIDTH = 792;
 export const DASHBOARD_HEIGHT = 528;
 
 /** Current schema version of the persisted builder state (see grid.js migration). */
-export const SPACES_SCHEMA_VERSION = 2;
+export const SPACES_SCHEMA_VERSION = 3;
 
 export type WidgetType = "metric" | "list" | "text";
 
@@ -36,8 +36,19 @@ export type Placement = {
 /** A computed pixel rect on the 792x528 canvas. Derived, never stored. */
 export type Rect = { x: number; y: number; w: number; h: number };
 
+/** Per-field styling overrides. Absent means "auto" — see fields.js. */
+export type FieldStyle = {
+  /** Explicit font size. Still clamped so it cannot spill out of its box. */
+  size?: number;
+  align?: TextAlign;
+};
+
+export type TextAlign = "left" | "center" | "right";
+
 type WidgetCommon = {
   id: string;
+  /** Styling per field key (label/value/delta/title/items/text). */
+  style?: Record<string, FieldStyle>;
   /**
    * Optional data script: the body of an async function `(fetch) => …` that
    * fetches from an API and returns what to display. On refresh its result is
@@ -54,8 +65,10 @@ export type ListFields = { type: "list"; title: string; items: string[] };
 export type TextFields = {
   type: "text";
   text: string;
+  /** @deprecated Legacy top-level styling; migrated into `style.text` (v3). */
   size?: number;
-  align?: "left" | "center";
+  /** @deprecated Legacy top-level styling; migrated into `style.text` (v3). */
+  align?: TextAlign;
 };
 
 export type WidgetFields = MetricFields | ListFields | TextFields;
@@ -164,8 +177,7 @@ export function defaultWidgets(): Widget[] {
       colSpan: 6,
       rowSpan: 3,
       text: "CROSSPOINT\nDASHBOARD",
-      size: 40,
-      align: "center",
+      style: { text: { size: 40, align: "center" } },
     },
   ];
 }

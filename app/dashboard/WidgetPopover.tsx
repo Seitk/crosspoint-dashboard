@@ -4,10 +4,11 @@
 // canvas, so editing happens where you are looking rather than in a long list
 // further down the page.
 //
-// It carries every field for the widget: display fields, span, data script and
-// remove. Position is not edited here — tiles are moved by dragging them on the
-// canvas (or nudged with the arrow keys), so the popover only reports which cell
-// the widget currently occupies.
+// It carries the widget-level settings only: span, data script and remove.
+// Position is not edited here — tiles are moved by dragging them on the canvas
+// (or nudged with the arrow keys). Individual field text and styling live in
+// FieldPopover, reached by clicking the field itself, so no value is editable in
+// two places.
 
 import { useEffect, useRef } from "react";
 
@@ -85,76 +86,9 @@ export default function WidgetPopover({
       </div>
 
       <div className={styles.fields}>
-        {widget.type === "metric" && (
-          <>
-            <input
-              aria-label="label"
-              placeholder="Label"
-              value={widget.label}
-              onChange={(e) => onChange({ label: e.target.value })}
-            />
-            <input
-              aria-label="value"
-              placeholder="Value"
-              value={widget.value}
-              onChange={(e) => onChange({ value: e.target.value })}
-            />
-            <input
-              aria-label="delta"
-              placeholder="Delta (optional)"
-              value={widget.delta ?? ""}
-              onChange={(e) => onChange({ delta: e.target.value })}
-            />
-          </>
-        )}
-
-        {widget.type === "list" && (
-          <>
-            <input
-              aria-label="title"
-              placeholder="Title"
-              value={widget.title}
-              onChange={(e) => onChange({ title: e.target.value })}
-            />
-            <textarea
-              aria-label="items"
-              placeholder="One item per line"
-              value={widget.items.join("\n")}
-              onChange={(e) => onChange({ items: e.target.value.split("\n") })}
-            />
-          </>
-        )}
-
-        {widget.type === "text" && (
-          <>
-            <textarea
-              aria-label="text"
-              placeholder="Text (newlines allowed)"
-              value={widget.text}
-              onChange={(e) => onChange({ text: e.target.value })}
-            />
-            <div className={styles.row}>
-              <label className="field grow">
-                Size
-                <input
-                  type="number"
-                  value={widget.size ?? 28}
-                  onChange={(e) => onChange({ size: Number(e.target.value) || 0 })}
-                />
-              </label>
-              <label className="field grow">
-                Align
-                <select
-                  value={widget.align ?? "left"}
-                  onChange={(e) => onChange({ align: e.target.value as "left" | "center" })}
-                >
-                  <option value="left">left</option>
-                  <option value="center">center</option>
-                </select>
-              </label>
-            </div>
-          </>
-        )}
+        <p className={styles.status} style={{ color: "#888", margin: "0 0 4px" }}>
+          Click a field on the preview to edit its text, size and alignment.
+        </p>
 
         <div className={styles.spanControls}>
           <label>

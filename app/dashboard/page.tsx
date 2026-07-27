@@ -12,6 +12,7 @@ import {
 import { applyScriptResult, proxiedFetch, runScript } from "./scripts";
 import TileOverlay, { useCanvasScale } from "./TileOverlay";
 import WidgetPopover from "./WidgetPopover";
+import FieldPopover from "./FieldPopover";
 import {
   canPlace,
   defaultSpan,
@@ -26,6 +27,7 @@ import {
   DASHBOARD_WIDTH,
   type Dashboard,
   defaultGrid,
+  type FieldStyle,
   defaultSpaces,
   emptySpace,
   type GridSpec,
@@ -124,6 +126,8 @@ export default function DashboardBuilder() {
   const importRef = useRef<HTMLInputElement | null>(null);
   /** Widget whose edit popover is open (clicked on the canvas). */
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** Field of that widget being edited, when the click landed on one. */
+  const [selectedField, setSelectedField] = useState<string | null>(null);
 
   const active = spaces[activeIndex] ?? spaces[0];
   const scale = useCanvasScale(canvasRef);
@@ -216,6 +220,29 @@ export default function DashboardBuilder() {
   const patchWidget = useCallback(
     (id: string, patch: WidgetPatch) => {
       updateActiveWidgets((ws) => ws.map((w) => (w.id === id ? ({ ...w, ...patch } as Widget) : w)));
+    },
+    [updateActiveWidgets],
+  );
+
+  /**
+   * Set one field's styling. An absent entry means "auto", so an empty override
+   * is deleted rather than stored — that keeps saved configs clean and lets
+   * fields.js fall back to its fitted size.
+   */
+  const patchFieldStyle = useCallback(
+    (id: string, key: string, style: FieldStyle) => {
+      updateActiveWidgets((ws) =>
+        ws.map((w) => {
+          if (w.id !== id) return w;
+          const next = { ...(w.style ?? {}) };
+          const clean: FieldStyle = { ...style };
+          if (clean.size == null) delete clean.size;
+          if (clean.align == null) delete clean.align;
+          if (Object.keys(clean).length === 0) delete next[key];
+          else next[key] = clean;
+          return { ...w, style: next };
+        }),
+      );
     },
     [updateActiveWidgets],
   );
@@ -494,11 +521,36 @@ export default function DashboardBuilder() {
               grid={active.grid}
               scale={scale}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              selectedField={selectedField}
+              onSelect={(id) => {
+                setSelectedId(id);
+                setSelectedField(null);
+              }}
+              onSelectField={(id, field) => {
+                setSelectedId(id);
+                setSelectedField(field);
+              }}
               onPlace={placeWidget}
             />
           )}
-          {active && selected && (
+          {active && selected && selectedField && (
+            <FieldPopover
+              widget={selected}
+              fieldKey={selectedField}
+              grid={active.grid}
+              scale={scale}
+              onChangeText={(value) =>
+                patchWidget(selected.id, { [selectedField]: value } as WidgetPatch)
+              }
+              onChangeStyle={(style) => patchFieldStyle(selected.id, selectedField, style)}
+              onOpenWidget={() => setSelectedField(null)}
+              onClose={() => {
+                setSelectedField(null);
+                setSelectedId(null);
+              }}
+            />
+          )}
+          {active && selected && !selectedField && (
             <WidgetPopover
               widget={selected}
               grid={active.grid}
@@ -716,7 +768,8 @@ export default function DashboardBuilder() {
           </div>
           <p className={styles.status} style={{ color: "#888" }}>
             Drag a tile on the preview to move it, drag its corner to resize, or click
-            it to edit. Arrow keys nudge a focused tile by one cell.
+            a field inside it to edit its text, size and alignment. Arrow keys
+            nudge a focused tile by one cell.
           </p>
           {Object.keys(scriptErrors).length > 0 && (
             <p className={styles.scriptError}>

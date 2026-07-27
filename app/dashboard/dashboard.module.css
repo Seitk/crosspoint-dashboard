@@ -302,6 +302,75 @@ button:disabled {
   opacity: 1;
 }
 
+/* Field regions inside a tile. Purely visual — pointer-events stay off so the
+   tile keeps one gesture stream and dragging works over them. */
+.fieldBox {
+  position: absolute;
+  pointer-events: none;
+  border: 1px dashed rgba(0, 120, 170, 0.55);
+  background: rgba(0, 150, 200, 0.06);
+}
+
+.fieldBox[data-hot="yes"] {
+  border-style: solid;
+  border-color: #06c;
+  background: rgba(0, 102, 204, 0.16);
+}
+
+.fieldBox[data-selected="yes"] {
+  border-style: solid;
+  border-color: #06c;
+  background: rgba(0, 102, 204, 0.22);
+}
+
+/* Styling controls inside the field popover. */
+.styleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.styleLabel {
+  font-size: 11px;
+  color: #888;
+}
+
+.autoToggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #888;
+}
+
+.autoToggle input {
+  width: auto;
+}
+
+.sizeField {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #888;
+}
+
+.sizeField input {
+  width: 68px;
+}
+
+.alignButton {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: #fff;
+  color: #111;
+}
+
+.alignButton[data-active="yes"] {
+  background: #111;
+  color: #fff;
+}
+
 /* Edit popover anchored to its tile. */
 .popover {
   position: absolute;

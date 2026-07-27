@@ -11,6 +11,8 @@
 // the `skills/crosspoint-dashboard` CLI import this one module, so the two can
 // never drift apart.
 
+import { migrateWidgetStyle } from "./fields.js";
+
 /** X3 e-ink geometry (landscape blit). Verified against firmware @ 1.4.1. */
 export const CANVAS = { width: 792, height: 528 };
 
@@ -271,7 +273,13 @@ export function layoutSpace(space, canvas = CANVAS) {
   return { width: canvas.width, height: canvas.height, widgets };
 }
 
-// ---- migration: v1 pixel widgets -> v2 grid widgets -------------------------
+// ---- migration --------------------------------------------------------------
+//
+// v1 -> v2: pixel rects become grid coordinates.
+// v2 -> v3: a text widget's top-level size/align move into style.text.
+
+/** Schema version this module migrates up to. Mirrors SPACES_SCHEMA_VERSION. */
+export const SCHEMA_VERSION = 3;
 
 /** Distinct values within `tol` px of each other, ascending. */
 function uniqSorted(values, tol) {
@@ -335,24 +343,29 @@ export function migrateSpace(space, canvas = CANVAS) {
   return { ...space, grid, widgets: fitted };
 }
 
-/** True when a stored blob still uses pixel rects (or predates `grid`). */
+/** True when a stored blob predates the current schema. */
 export function needsMigration(state) {
   if (!state || !Array.isArray(state.spaces)) return false;
-  if (state.version >= 2) return false;
-  return true;
+  return (state.version ?? 1) < SCHEMA_VERSION;
 }
 
 /**
- * Bring any persisted builder state up to the current version. Safe to call on
- * already-migrated state (it is a no-op then).
+ * Bring any persisted builder state up to the current version, applying each
+ * step in order so a very old blob migrates all the way. Safe to call on
+ * already-current state (it is a no-op then).
  */
 export function migrateSpacesState(state, canvas = CANVAS) {
   if (!needsMigration(state)) return state;
-  return {
-    ...state,
-    version: 2,
-    spaces: state.spaces.map((s) => migrateSpace(s, canvas)),
-  };
+  const version = state.version ?? 1;
+  let spaces = state.spaces;
+  if (version < 2) spaces = spaces.map((s) => migrateSpace(s, canvas));
+  if (version < 3) {
+    spaces = spaces.map((s) => ({
+      ...s,
+      widgets: (s.widgets ?? []).map(migrateWidgetStyle),
+    }));
+  }
+  return { ...state, version: SCHEMA_VERSION, spaces };
 }
 
 // ---- pixel-level safety net -------------------------------------------------

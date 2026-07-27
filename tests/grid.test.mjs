@@ -325,7 +325,7 @@ test("migrateSpacesState: v1 pixel state converts without losing widgets or scri
   };
 
   const v2 = migrateSpacesState(structuredClone(v1));
-  assert.equal(v2.version, 2);
+  assert.equal(v2.version, 3, "migrates all the way to the current schema");
   const space = v2.spaces[0];
   assert.equal(space.widgets.length, 4, "widget count preserved");
   assert.ok(space.grid.cols >= 1 && space.grid.rows >= 1, "a grid was inferred");
@@ -342,19 +342,54 @@ test("migrateSpacesState: v1 pixel state converts without losing widgets or scri
   assert.equal(w1.delta, "+1.24%");
   assert.equal(w1.script, "return 1;", "script carried across");
   assert.deepEqual(space.widgets.find((w) => w.id === "w3").items, ["a", "b"]);
-  assert.equal(space.widgets.find((w) => w.id === "w4").align, "center");
+  // v3 folds a text widget's top-level size/align into its per-field style map.
+  const w4 = space.widgets.find((w) => w.id === "w4");
+  assert.deepEqual(w4.style.text, { size: 40, align: "center" });
+  assert.equal(w4.align, undefined, "legacy top-level align dropped");
 
   // And the migrated space must render cleanly.
   assert.ok(validate(layoutSpace(space).widgets).ok, "migrated layout is overlap-free");
 });
 
-test("migrateSpacesState: already-v2 state is returned untouched", () => {
-  const v2 = {
-    version: 2,
+test("migrateSpacesState: already-current state is returned untouched", () => {
+  const current = {
+    version: 3,
     activeIndex: 0,
     spaces: [{ id: "s1", name: "S", grid: { cols: 2, rows: 2, margin: 16, gutter: 12 }, widgets: [] }],
   };
-  assert.deepEqual(migrateSpacesState(v2), v2);
+  assert.deepEqual(migrateSpacesState(current), current);
+});
+
+test("migrateSpacesState: a v2 blob gains per-field styles without touching layout", () => {
+  const v2 = {
+    version: 2,
+    activeIndex: 0,
+    spaces: [
+      {
+        id: "s1",
+        name: "S",
+        grid: { cols: 2, rows: 2, margin: 16, gutter: 12 },
+        widgets: [
+          { id: "t", type: "text", col: 0, row: 0, colSpan: 1, rowSpan: 1, text: "HI", size: 40, align: "center" },
+          { id: "m", type: "metric", col: 1, row: 0, colSpan: 1, rowSpan: 1, label: "L", value: "1" },
+        ],
+      },
+    ],
+  };
+  const out = migrateSpacesState(structuredClone(v2));
+  assert.equal(out.version, 3);
+
+  const text = out.spaces[0].widgets.find((w) => w.id === "t");
+  assert.deepEqual(text.style.text, { size: 40, align: "center" });
+  assert.equal(text.size, undefined, "legacy top-level size dropped");
+  assert.equal(text.align, undefined, "legacy top-level align dropped");
+  // Grid placement is v2 already and must survive untouched.
+  assert.deepEqual(
+    { col: text.col, row: text.row, colSpan: text.colSpan, rowSpan: text.rowSpan },
+    { col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+  );
+  const metricW = out.spaces[0].widgets.find((w) => w.id === "m");
+  assert.deepEqual(metricW, v2.spaces[0].widgets[1], "a metric is unaffected");
 });
 
 test("migrateSpacesState: overlapping v1 rects still yield a clean grid", () => {
