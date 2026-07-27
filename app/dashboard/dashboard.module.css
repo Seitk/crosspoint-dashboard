@@ -206,15 +206,111 @@ button:disabled {
   gap: 8px;
 }
 
-.geo {
+/* Per-space grid dimensions (cols / rows / margin / gutter). */
+.gridControls {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 6px;
 }
 
-.geo label {
+.gridControls label {
   font-size: 11px;
   color: #888;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Click-to-place cell map inside a widget editor. */
+.picker {
+  margin-top: 10px;
+  border-top: 1px solid #eee;
+  padding-top: 10px;
+}
+
+.cellGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cellRow {
+  display: flex;
+  gap: 3px;
+}
+
+/* Square-ish cells that scale with the panel width. */
+.cell {
+  flex: 1;
+  aspect-ratio: 3 / 2;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid #ccc;
+  background: #fff;
+  cursor: pointer;
+}
+
+.cell:hover:not(:disabled) {
+  border-color: #000;
+  background: #f0f0f0;
+}
+
+/* The widget being edited. */
+.cell[data-state="self"] {
+  background: #000;
+  border-color: #000;
+}
+
+/* Occupied by a different widget — not clickable, so overlap can't be chosen. */
+.cell[data-state="taken"] {
+  background: repeating-linear-gradient(
+    45deg,
+    #ddd,
+    #ddd 3px,
+    #fff 3px,
+    #fff 6px
+  );
+  cursor: not-allowed;
+}
+
+.spanControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.spanControls label {
+  font-size: 11px;
+  color: #888;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.spanControls input {
+  width: 52px;
+}
+
+.cellHint {
+  margin-left: auto;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  color: #888;
+}
+
+/* Autosave badge in the canvas bar. */
+.saveState {
+  margin-left: 8px;
+  font-size: 11px;
+}
+
+.saveState[data-state="saved"] {
+  color: #2a7;
+}
+
+.saveState[data-state="error"] {
+  color: #b00;
 }
 
 .addRow {

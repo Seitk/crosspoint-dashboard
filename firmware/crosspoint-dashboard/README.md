@@ -20,7 +20,10 @@ The pushed body **is** the packed framebuffer — no PNG decode, no SD spool, no
 decode guard. This removes the three biggest firmware risks and keeps the fork tiny.
 
 ## Wire contract (must match the web push)
-- `POST /frame?space=<i>&count=<n>&show=<0|1>` on port 80, as **`multipart/form-data`** with
+Every route this activity owns lives under **`/api/`**. (The stock file-server activity's
+endpoints — `/upload`, `/files` — are a separate namespace and are unaffected.)
+
+- `POST /api/frame?space=<i>&count=<n>&show=<0|1>` on port 80, as **`multipart/form-data`** with
   the frame as a file field. (The ESP32 `WebServer` streams a large body via its upload
   handler; the raw `arg("plain")` path is unreliable at 52 KB and just closes the socket.)
   - `space` — which space, 0-based; `count` — total pushed spaces (extras are pruned from SD);
@@ -29,6 +32,15 @@ decode guard. This removes the three biggest firmware risks and keeps the fork t
   - **X3: 792×528 → stride 99 → 52,272 bytes.** Read geometry at runtime; never hardcode.
 - `200 OK` after the frame is saved (and displayed if it's the space currently shown).
 - Wrong body size → `400` with the expected/received byte counts.
+
+Also served:
+- `GET /api/status` — device status JSON. Mirrors the stock `CrossPointWebServer` endpoint
+  (`version`/`ip`/`mode`/`rssi`/`freeHeap`/`uptime`/`device`) so the web companion's home page
+  works while the device is in dashboard mode, plus `activity`/`spaces`/`space`. The stock
+  endpoint belongs to the file-server activity, which isn't running here — without this the
+  companion reports the device as offline.
+- `POST /api/firmware` — streams a firmware `.bin` to the SD card as `/update.bin`; flash it
+  on-device with the stock recovery flow (hold **POWER + UP** at boot).
 
 ## Files
 | File | Purpose |

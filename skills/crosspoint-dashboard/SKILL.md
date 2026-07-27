@@ -25,8 +25,14 @@ overlap structurally impossible (disjoint cells) and lets you think in tiles.
 
 ## The model (see `app/dashboard/types.ts`)
 
-A dashboard is `{ width: 792, height: 528, widgets: Widget[] }`. Every widget has
-`id`, pixel rect `x, y, w, h`, an optional `script`, and type-specific fields:
+A space is `{ id, name, grid: { cols, rows, margin, gutter }, widgets: Widget[] }`.
+Every widget has `id`, a **grid placement** `col, row, colSpan, rowSpan`, an optional
+`script`, and type-specific fields. Pixel rects are **derived** from the grid by
+`app/dashboard/grid.js` at draw/push time and are never stored — which is what makes
+overlap impossible to express. That module is shared: the builder UI and this CLI both
+import it, so they cannot drift.
+
+Type-specific fields:
 
 - **metric** — `label`, `value`, `delta?` (a KPI tile: label, big number, small delta line)
 - **list** — `title`, `items: string[]` (a titled list, e.g. a TODO)
@@ -98,17 +104,22 @@ return (await r.json()).slice(0, 6).map(t => t.title);
    emit** a layout where two widgets share a cell or run off the grid. The output
    is a ready-to-use Dashboard config.
 
-4. **Load it into the builder.** The app persists/loads the dashboard from
-   `localStorage["crosspoint-dashboard"]`. To apply your generated config, open
-   `/dashboard`, and in the browser devtools console run:
+4. **Load it into the builder.** Generate an importable config and open it with the
+   builder's **IMPORT JSON** button (Push card):
 
-   ```js
-   localStorage.setItem("crosspoint-dashboard", JSON.stringify(/* paste /tmp/dashboard.json */));
-   location.reload();
+   ```bash
+   node skills/crosspoint-dashboard/scripts/layout.mjs --spaces /tmp/spec.json > /tmp/spaces.json
    ```
 
-   (Or edit widgets directly in the builder UI — but if you move/resize by hand,
-   re-validate with step 6.)
+   `--spaces` keeps the **grid coordinates**, so the imported layout stays editable
+   in the builder's cell picker. **EXPORT JSON** does the reverse (round-trips the
+   whole set of spaces to a file you can commit).
+
+   > Do **not** try to inject `localStorage["crosspoint-dashboard"]` — that legacy
+   > key is only read when no builder state exists yet, so on any browser that has
+   > opened `/dashboard` it is silently ignored.
+
+   (Or just edit in the builder UI — the cell picker can't produce an overlap.)
 
 5. **Push to the X3.** In the builder set the **Device IP** (shown on the device's
    Dashboard status bar) and click **PUSH TO X3**, or enable **Auto-refresh + push**

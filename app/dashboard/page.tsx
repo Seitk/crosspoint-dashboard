@@ -11,15 +11,27 @@ import {
 } from "./render";
 import { applyScriptResult, proxiedFetch, runScript } from "./scripts";
 import {
+  canPlace,
+  layoutSpace,
+  migrateSpacesState,
+  occupancy,
+  refitToGrid,
+} from "./grid.js";
+import {
   DASHBOARD_HEIGHT,
   DASHBOARD_WIDTH,
   type Dashboard,
+  defaultGrid,
   defaultSpaces,
+  emptySpace,
+  type GridSpec,
   type ListWidget,
   type MetricWidget,
   nextId,
+  type Placement,
   type Space,
   type SpacesState,
+  SPACES_SCHEMA_VERSION,
   type TextWidget,
   type Widget,
   type WidgetType,
@@ -30,6 +42,8 @@ const STORAGE_SPACES = "crosspoint-spaces";
 const STORAGE_DASH_LEGACY = "crosspoint-dashboard";
 const STORAGE_IP = "crosspoint-device-ip";
 
+type SaveState = "idle" | "saved" | "error";
+
 /** A patch that may touch any widget field; callers only pass valid ones. */
 type WidgetPatch = Partial<
   Omit<MetricWidget, "type" | "id"> &
@@ -37,8 +51,18 @@ type WidgetPatch = Partial<
     Omit<TextWidget, "type" | "id">
 >;
 
-function asDashboard(widgets: Widget[]): Dashboard {
-  return { width: DASHBOARD_WIDTH, height: DASHBOARD_HEIGHT, widgets };
+/**
+ * Grid widgets -> pixel rects. layoutSpace() throws on a bad layout rather than
+ * emitting overlapping tiles; an imported or hand-edited file could be bad, and
+ * the editor must never crash on one, so refit and retry before giving up.
+ */
+function safeLayout(space: Space): Dashboard {
+  try {
+    return layoutSpace(space) as Dashboard;
+  } catch {
+    const { widgets } = refitToGrid(space.widgets, space.grid);
+    return layoutSpace({ ...space, widgets }) as Dashboard;
+  }
 }
 
 /** Run every scripted widget in a list; returns updated widgets + per-id errors. */
@@ -73,15 +97,25 @@ export default function DashboardBuilder() {
   const [autoSec, setAutoSec] = useState(60);
   const [autoPush, setAutoPush] = useState(false);
   const [scriptErrors, setScriptErrors] = useState<Record<string, string>>({});
+  const [fwFile, setFwFile] = useState<File | null>(null);
+  const [fwBusy, setFwBusy] = useState(false);
+  const [fwStatus, setFwStatus] = useState("");
+  /** Whether the last persist attempt succeeded, shown as a badge by the canvas. */
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const saveRef = useRef<SaveState>("idle");
+  /** Transient note when a grid change had to relocate widgets. */
+  const [gridNote, setGridNote] = useState("");
+  const importRef = useRef<HTMLInputElement | null>(null);
 
   const active = spaces[activeIndex] ?? spaces[0];
 
-  // Restore saved spaces (or migrate an old single-dashboard config) + device IP.
+  // Restore saved spaces (migrating older schemas) + device IP.
   useEffect(() => {
     try {
       const savedSpaces = window.localStorage.getItem(STORAGE_SPACES);
       if (savedSpaces) {
-        const parsed = JSON.parse(savedSpaces) as SpacesState;
+        // v1 stored pixel rects; migrateSpacesState snaps them onto a grid.
+        const parsed = migrateSpacesState(JSON.parse(savedSpaces)) as SpacesState;
         if (parsed.spaces?.length) {
           // eslint-disable-next-line react-hooks/set-state-in-effect
           setSpaces(parsed.spaces);
@@ -90,8 +124,12 @@ export default function DashboardBuilder() {
       } else {
         const legacy = window.localStorage.getItem(STORAGE_DASH_LEGACY);
         if (legacy) {
-          const dash = JSON.parse(legacy) as Dashboard;
-          setSpaces([{ id: nextId("s"), name: "Space 1", widgets: dash.widgets }]);
+          const dash = JSON.parse(legacy) as { widgets: unknown[] };
+          const migrated = migrateSpacesState({
+            spaces: [{ id: nextId("s"), name: "Space 1", widgets: dash.widgets }],
+            activeIndex: 0,
+          }) as SpacesState;
+          setSpaces(migrated.spaces);
         }
       }
     } catch {
@@ -106,19 +144,31 @@ export default function DashboardBuilder() {
     if (!canvas || !active) return;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
-    drawDashboard(ctx, asDashboard(active.widgets));
+    drawDashboard(ctx, safeLayout(active));
     if (oneBit) applyMonochrome(canvas);
+    let outcome: SaveState;
     try {
-      window.localStorage.setItem(STORAGE_SPACES, JSON.stringify({ spaces, activeIndex }));
+      window.localStorage.setItem(
+        STORAGE_SPACES,
+        JSON.stringify({ version: SPACES_SCHEMA_VERSION, spaces, activeIndex }),
+      );
+      outcome = "saved";
     } catch {
-      /* storage full / unavailable — non-fatal */
+      outcome = "error"; // storage full / unavailable — non-fatal, but say so
+    }
+    // Persisting is external-system sync, which belongs in an effect; the badge
+    // just reports its outcome. Only re-render when that outcome actually flips,
+    // so this can't cascade.
+    if (saveRef.current !== outcome) {
+      saveRef.current = outcome;
+      setSaveState(outcome);
     }
   }, [spaces, activeIndex, active, oneBit]);
 
   // --- space management --------------------------------------------------------
 
   const addSpace = useCallback(() => {
-    setSpaces((sp) => [...sp, { id: nextId("s"), name: `Space ${sp.length + 1}`, widgets: [] }]);
+    setSpaces((sp) => [...sp, emptySpace(`Space ${sp.length + 1}`)]);
     setActiveIndex(spaces.length); // new space is appended at the old length
   }, [spaces.length]);
 
@@ -156,8 +206,45 @@ export default function DashboardBuilder() {
   );
 
   const addWidget = useCallback(
-    (type: WidgetType) => updateActiveWidgets((ws) => [...ws, makeWidget(type, ws.length)]),
-    [updateActiveWidgets],
+    (type: WidgetType) =>
+      updateActiveWidgets((ws) => [...ws, makeWidget(type, ws, active?.grid ?? defaultGrid())]),
+    [updateActiveWidgets, active],
+  );
+
+  // --- grid ---------------------------------------------------------------------
+
+  /** Resize the active space's grid, refitting any widget that no longer fits. */
+  const changeGrid = useCallback(
+    (patch: Partial<GridSpec>) => {
+      setSpaces((sp) =>
+        sp.map((s, i) => {
+          if (i !== activeIndex) return s;
+          const grid = { ...s.grid, ...patch };
+          // Guard against a grid so dense that a cell has no pixels left.
+          if (grid.cols < 1 || grid.rows < 1 || grid.margin < 0 || grid.gutter < 0) return s;
+          const { widgets, moved } = refitToGrid(s.widgets, grid);
+          setGridNote(
+            moved.length
+              ? `Grid changed — ${moved.length} widget${moved.length === 1 ? "" : "s"} moved to fit.`
+              : "",
+          );
+          return { ...s, grid, widgets };
+        }),
+      );
+    },
+    [activeIndex],
+  );
+
+  /** Move/resize one widget, but only to a placement that stays legal. */
+  const placeWidget = useCallback(
+    (id: string, placement: Placement) => {
+      updateActiveWidgets((ws) => {
+        const grid = active?.grid ?? defaultGrid();
+        if (!canPlace(ws, grid, id, placement)) return ws;
+        return ws.map((w) => (w.id === id ? { ...w, ...placement } : w));
+      });
+    },
+    [updateActiveWidgets, active],
   );
 
   // --- data scripts ------------------------------------------------------------
@@ -192,12 +279,12 @@ export default function DashboardBuilder() {
   // --- pushing to the device ---------------------------------------------------
 
   const postSpace = useCallback(
-    async (index: number, widgets: Widget[], count: number, show: boolean, target: string) => {
-      const bytes = renderDashboardToFrameBytes(asDashboard(widgets));
+    async (index: number, space: Space, count: number, show: boolean, target: string) => {
+      const bytes = renderDashboardToFrameBytes(safeLayout(space));
       const form = new FormData();
       form.append("frame", new File([bytes], "frame.bin", { type: "application/octet-stream" }));
       const res = await fetch(
-        `/x3/frame?space=${index}&count=${count}&show=${show ? 1 : 0}`,
+        `/x3/api/frame?space=${index}&count=${count}&show=${show ? 1 : 0}`,
         { method: "POST", headers: { "x-crosspoint-ip": target }, body: form },
       );
       if (!res.ok) throw new Error(`X3 rejected space ${index + 1} (HTTP ${res.status})`);
@@ -211,7 +298,7 @@ export default function DashboardBuilder() {
     setStatus("");
     try {
       const target = ip.trim();
-      const kb = (await postSpace(activeIndex, active.widgets, spaces.length, true, target)) / 1024;
+      const kb = (await postSpace(activeIndex, active, spaces.length, true, target)) / 1024;
       window.localStorage.setItem(STORAGE_IP, target);
       setStatus(`Pushed "${active.name}" (${kb.toFixed(1)} KB) to ${target}.`);
     } catch (err) {
@@ -227,7 +314,7 @@ export default function DashboardBuilder() {
     try {
       const target = ip.trim();
       for (let i = 0; i < spaces.length; i++) {
-        await postSpace(i, spaces[i].widgets, spaces.length, false, target);
+        await postSpace(i, spaces[i], spaces.length, false, target);
       }
       window.localStorage.setItem(STORAGE_IP, target);
       setStatus(`Pushed all ${spaces.length} space(s) to ${target}.`);
@@ -255,6 +342,79 @@ export default function DashboardBuilder() {
     }
   }, [active]);
 
+  // --- config export / import ---------------------------------------------------
+
+  /** Save every space to a .json file — survives a cleared browser, diffable in git. */
+  const exportConfig = useCallback(() => {
+    const state: SpacesState = { version: SPACES_SCHEMA_VERSION, spaces, activeIndex };
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "crosspoint-dashboard.json";
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus(`Exported ${spaces.length} space(s) to crosspoint-dashboard.json.`);
+  }, [spaces, activeIndex]);
+
+  /**
+   * Load a config file. Accepts current builder state, an older pixel-based
+   * export, or the output of `layout.mjs --spaces` — everything goes through the
+   * same migration, so a CLI-generated layout lands editable in the picker.
+   */
+  const importConfig = useCallback(async (file: File) => {
+    try {
+      const raw = JSON.parse(await file.text());
+      // A bare Dashboard ({widgets:[...]}) counts as a single space.
+      const state = Array.isArray(raw?.spaces)
+        ? raw
+        : { spaces: [{ id: nextId("s"), name: file.name.replace(/\.json$/i, ""), widgets: raw?.widgets ?? [] }], activeIndex: 0 };
+      const migrated = migrateSpacesState(state) as SpacesState;
+      if (!migrated.spaces?.length) throw new Error("no spaces in that file");
+
+      // Refit on the way in so an out-of-spec file can't produce overlapping tiles.
+      const clean = migrated.spaces.map((s) => ({
+        ...s,
+        ...(() => {
+          const { widgets } = refitToGrid(s.widgets, s.grid);
+          return { widgets };
+        })(),
+      }));
+      setSpaces(clean);
+      setActiveIndex(Math.min(migrated.activeIndex ?? 0, clean.length - 1));
+      setStatus(`Imported ${clean.length} space(s) from ${file.name}.`);
+    } catch (err) {
+      setStatus(`Import failed: ${err instanceof Error ? err.message : "unreadable file"}`);
+    }
+  }, []);
+
+  // Upload a firmware .bin to the device's SD card (as /update.bin). Flashing is
+  // done separately on the X3 with the stock recovery flow (hold POWER + UP).
+  const uploadFirmware = useCallback(async () => {
+    if (!fwFile) return;
+    setFwBusy(true);
+    setFwStatus("");
+    try {
+      const target = ip.trim();
+      const form = new FormData();
+      form.append("firmware", fwFile, "update.bin");
+      const res = await fetch("/x3/api/firmware", {
+        method: "POST",
+        headers: { "x-crosspoint-ip": target },
+        body: form,
+      });
+      if (!res.ok) throw new Error(`X3 rejected the upload (HTTP ${res.status})`);
+      window.localStorage.setItem(STORAGE_IP, target);
+      setFwStatus(
+        `Uploaded ${(fwFile.size / 1024 / 1024).toFixed(2)} MB → update.bin. On the X3, hold POWER + UP at boot to flash.`,
+      );
+    } catch (err) {
+      setFwStatus(pushError(err));
+    } finally {
+      setFwBusy(false);
+    }
+  }, [fwFile, ip]);
+
   // Auto-refresh: run every space's scripts, then (optionally) push them all.
   const tickRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -264,7 +424,7 @@ export default function DashboardBuilder() {
         if (autoPush) {
           const target = ip.trim();
           for (let i = 0; i < fresh.length; i++) {
-            await postSpace(i, fresh[i].widgets, fresh.length, false, target);
+            await postSpace(i, fresh[i], fresh.length, false, target);
           }
         }
       })();
@@ -305,7 +465,13 @@ export default function DashboardBuilder() {
             1-bit preview (what the X3 receives)
           </label>
           <span>
-            {active?.name} · {active?.widgets.length ?? 0} widgets
+            {active?.name} · {active?.widgets.length ?? 0} widgets ·{" "}
+            {active?.grid?.cols}×{active?.grid?.rows} grid
+            <span className={styles.saveState} data-state={saveState}>
+              {saveState === "saved" && "saved ✓"}
+              
+              {saveState === "error" && "not saved ⚠"}
+            </span>
           </span>
         </div>
       </section>
@@ -345,6 +511,39 @@ export default function DashboardBuilder() {
         </section>
 
         <section className={styles.card}>
+          <p className={styles.cardTitle}>Grid · {active?.name}</p>
+          <div className={styles.gridControls}>
+            {(
+              [
+                ["cols", "Cols", 1, 8],
+                ["rows", "Rows", 1, 6],
+                ["margin", "Margin", 0, 64],
+                ["gutter", "Gutter", 0, 48],
+              ] as const
+            ).map(([key, label, min, max]) => (
+              <label key={key}>
+                {label}
+                <input
+                  type="number"
+                  min={min}
+                  max={max}
+                  value={active?.grid?.[key] ?? 0}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    if (Number.isFinite(n)) changeGrid({ [key]: Math.max(min, Math.min(max, n)) });
+                  }}
+                />
+              </label>
+            ))}
+          </div>
+          {gridNote && <p className={styles.scriptError}>{gridNote}</p>}
+          <p className={styles.status} style={{ color: "#888" }}>
+            Tiles are placed on this grid, so they can never overlap. Pick a cell in each
+            widget below to move it.
+          </p>
+        </section>
+
+        <section className={styles.card}>
           <p className={styles.cardTitle}>Push</p>
           <label className="field">
             Device IP
@@ -363,7 +562,49 @@ export default function DashboardBuilder() {
               DOWNLOAD PNG
             </button>
           </div>
+          <div className={styles.row} style={{ marginTop: 8 }}>
+            <button className="ghost" onClick={exportConfig}>
+              EXPORT JSON
+            </button>
+            <button className="ghost" onClick={() => importRef.current?.click()}>
+              IMPORT JSON
+            </button>
+            <input
+              ref={importRef}
+              type="file"
+              accept=".json,application/json"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void importConfig(f);
+                e.target.value = ""; // let the same file be picked again
+              }}
+            />
+          </div>
           <p className={styles.status}>{status}</p>
+        </section>
+
+        <section className={styles.card}>
+          <p className={styles.cardTitle}>Firmware</p>
+          <input
+            type="file"
+            accept=".bin"
+            onChange={(e) => setFwFile(e.target.files?.[0] ?? null)}
+            style={{ fontSize: 13 }}
+          />
+          <button
+            className={styles.grow}
+            style={{ marginTop: 10 }}
+            onClick={uploadFirmware}
+            disabled={fwBusy || !fwFile}
+          >
+            {fwBusy ? "UPLOADING…" : "UPLOAD FIRMWARE TO X3"}
+          </button>
+          <p className={styles.status}>{fwStatus}</p>
+          <p className={styles.status} style={{ color: "#888" }}>
+            Sends a .bin to the SD card as <strong>update.bin</strong>. Then on the X3, hold{" "}
+            <strong>POWER + UP</strong> at boot to flash it.
+          </p>
         </section>
 
         <section className={styles.card}>
@@ -417,8 +658,11 @@ export default function DashboardBuilder() {
               <WidgetEditor
                 key={w.id}
                 widget={w}
+                grid={active.grid}
+                siblings={active.widgets}
                 error={scriptErrors[w.id]}
                 onChange={(patch) => patchWidget(w.id, patch)}
+                onPlace={(placement) => placeWidget(w.id, placement)}
                 onRemove={() => removeWidget(w.id)}
               />
             ))}
@@ -435,15 +679,121 @@ function pushError(err: unknown): string {
     : "Push failed.";
 }
 
+/**
+ * Click-to-place grid map. Cells occupied by other widgets are disabled, so a
+ * collision can't be expressed — the invariant is enforced at the input, not
+ * patched up afterwards.
+ */
+function CellPicker({
+  widget,
+  grid,
+  siblings,
+  onPlace,
+}: {
+  widget: Widget;
+  grid: GridSpec;
+  siblings: Widget[];
+  onPlace: (placement: Placement) => void;
+}) {
+  const taken = occupancy(siblings, widget.id) as Map<string, string>;
+  const self = { col: widget.col, row: widget.row, colSpan: widget.colSpan, rowSpan: widget.rowSpan };
+  // Title by display name, not id: widget ids come from a counter that differs
+  // between the SSR and client render, and putting one in an attribute makes
+  // React report a hydration mismatch. Names are stable and read better anyway.
+  const nameOf = new Map(siblings.map((w) => [w.id, describe(w)]));
+
+  const move = (col: number, row: number) => {
+    // Keep the current span if it still fits; otherwise fall back to 1x1.
+    const keep = { col, row, colSpan: self.colSpan, rowSpan: self.rowSpan };
+    if (canPlace(siblings, grid, widget.id, keep)) return onPlace(keep);
+    onPlace({ col, row, colSpan: 1, rowSpan: 1 });
+  };
+
+  const setSpan = (colSpan: number, rowSpan: number) => {
+    const next = { col: self.col, row: self.row, colSpan, rowSpan };
+    if (colSpan >= 1 && rowSpan >= 1 && canPlace(siblings, grid, widget.id, next)) onPlace(next);
+  };
+
+  const rows = [];
+  for (let row = 0; row < grid.rows; row++) {
+    const cells = [];
+    for (let col = 0; col < grid.cols; col++) {
+      const isSelf =
+        col >= self.col && col < self.col + self.colSpan &&
+        row >= self.row && row < self.row + self.rowSpan;
+      const takenBy = taken.get(`${col},${row}`);
+      const state = isSelf ? "self" : takenBy ? "taken" : "free";
+      cells.push(
+        <button
+          key={col}
+          type="button"
+          className={styles.cell}
+          data-state={state}
+          disabled={state === "taken"}
+          aria-label={`cell ${col},${row}${state === "taken" ? " (occupied)" : ""}`}
+          title={
+            state === "taken"
+              ? `occupied by ${nameOf.get(takenBy ?? "") ?? "another widget"}`
+              : `move to ${col},${row}`
+          }
+          onClick={() => move(col, row)}
+        />,
+      );
+    }
+    rows.push(
+      <div key={row} className={styles.cellRow}>
+        {cells}
+      </div>,
+    );
+  }
+
+  return (
+    <div className={styles.picker}>
+      <div className={styles.cellGrid}>{rows}</div>
+      <div className={styles.spanControls}>
+        <label>
+          Span W
+          <input
+            type="number"
+            min={1}
+            max={grid.cols}
+            value={self.colSpan}
+            onChange={(e) => setSpan(Math.max(1, Number(e.target.value) || 1), self.rowSpan)}
+          />
+        </label>
+        <label>
+          Span H
+          <input
+            type="number"
+            min={1}
+            max={grid.rows}
+            value={self.rowSpan}
+            onChange={(e) => setSpan(self.colSpan, Math.max(1, Number(e.target.value) || 1))}
+          />
+        </label>
+        <span className={styles.cellHint}>
+          cell {self.col},{self.row}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function WidgetEditor({
   widget,
+  grid,
+  siblings,
   error,
   onChange,
+  onPlace,
   onRemove,
 }: {
   widget: Widget;
+  grid: GridSpec;
+  siblings: Widget[];
   error?: string;
   onChange: (patch: WidgetPatch) => void;
+  onPlace: (placement: Placement) => void;
   onRemove: () => void;
 }) {
   const num = (v: string) => {
@@ -545,31 +895,37 @@ function WidgetEditor({
         </label>
         {error && <p className={styles.scriptError}>⚠ {error}</p>}
 
-        <div className={styles.geo}>
-          {(["x", "y", "w", "h"] as const).map((k) => (
-            <label key={k}>
-              {k.toUpperCase()}
-              <input
-                type="number"
-                value={widget[k]}
-                onChange={(e) => onChange({ [k]: num(e.target.value) })}
-              />
-            </label>
-          ))}
-        </div>
+        <CellPicker widget={widget} grid={grid} siblings={siblings} onPlace={onPlace} />
       </div>
     </div>
   );
 }
 
-function makeWidget(type: WidgetType, index: number): Widget {
-  const y = 16 + (index % 3) * 172;
-  const base = { id: nextId(), x: 16, y, w: 372, h: 160 };
+/** Human-readable name for a widget, for tooltips. Never its id (see CellPicker). */
+function describe(w: Widget): string {
+  if (w.type === "metric") return w.label || "metric";
+  if (w.type === "list") return w.title || "list";
+  return (w.text || "text").split("\n")[0];
+}
+
+/** Place a new widget in the first free cell, so adding never causes an overlap. */
+function makeWidget(type: WidgetType, existing: Widget[], grid: GridSpec): Widget {
+  const taken = occupancy(existing) as Map<string, string>;
+  let spot = { col: 0, row: 0, colSpan: 1, rowSpan: 1 };
+  outer: for (let row = 0; row < grid.rows; row++) {
+    for (let col = 0; col < grid.cols; col++) {
+      if (!taken.has(`${col},${row}`)) {
+        spot = { col, row, colSpan: 1, rowSpan: 1 };
+        break outer;
+      }
+    }
+  }
+  const base = { id: nextId(), ...spot };
   if (type === "metric") {
     return { ...base, type, label: "Label", value: "0", delta: "" };
   }
   if (type === "list") {
-    return { ...base, type, h: 220, title: "List", items: ["Item one", "Item two"] };
+    return { ...base, type, title: "List", items: ["Item one", "Item two"] };
   }
-  return { ...base, type, h: 120, text: "Text", size: 28, align: "left" };
+  return { ...base, type, text: "Text", size: 28, align: "left" };
 }

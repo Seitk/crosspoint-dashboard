@@ -5,7 +5,9 @@
 #include "WifiCredentialStore.h"    // WIFI_STORE / WifiCredential
 #include "fontIds.h"                // UI_12_FONT_ID / UI_10_FONT_ID / NOTOSANS_*
 
+#include <ArduinoJson.h>            // /api/status payload (same shape as the stock server)
 #include <HalClock.h>               // halClock — RTC time for the System space
+#include <HalGPIO.h>                // gpio.deviceIsX3() — reported by /api/status
 #include <HalPowerManager.h>        // powerManager.getBatteryPercentage()
 #include <HalStorage.h>             // Storage / HalFile — persist spaces to SD
 #include <Logging.h>                // LOG_ERR / LOG_INF
@@ -31,6 +33,11 @@ static constexpr int SYSTEM_SPACE = MAX_SPACES;
 static constexpr const char* STATE_PATH = "/.crosspoint/dash_state.bin";
 // Presence of this marker boots the device straight into the dashboard (main.cpp).
 static constexpr const char* MODE_MARKER_PATH = "/.crosspoint/dashboard_mode";
+
+// Where an uploaded firmware image is saved on the SD card. The user then flashes
+// it with the stock recovery flow (hold POWER + UP at boot). Kept at the SD root so
+// it's easy to find in the recovery firmware picker.
+static constexpr const char* FIRMWARE_PATH = "/update.bin";
 
 static void spacePath(int index, char* out, size_t n) {
   snprintf(out, n, "/.crosspoint/space%d.bin", index);
@@ -70,14 +77,19 @@ bool DashboardActivity::loadSpaceFrame(int index) {
   if (!frame) return false;
   char path[40];
   spacePath(index, path, sizeof(path));
-  if (!Storage.exists(path)) return false;
-  const size_t n = Storage.readFileToBuffer(
-      path, reinterpret_cast<char*>(frame.get()), frameCap, frameCap);
-  if (n == frameCap) {
+  if (!Storage.exists(path)) return false;  // empty space: not an error, stay quiet
+  // NOT Storage.readFileToBuffer(): that's a *text* helper — it caps the read at
+  // bufferSize-1 and NUL-terminates, so it can never return a full frameCap and
+  // would scribble a 0 over the last framebuffer byte. Read the bytes directly,
+  // mirroring the file.write() in saveBufferToSpace().
+  HalFile file;
+  if (!Storage.openFileForRead("DASH", path, file)) return false;
+  const int n = file.read(frame.get(), frameCap);
+  if (n == static_cast<int>(frameCap)) {
     haveFrame = true;
-    return true;
+    return true;  // HalFile auto-closes at scope exit (DESTRUCTOR_CLOSES_FILE=1).
   }
-  if (n > 0) LOG_ERR("DASH", "space %d wrong size (%u), ignoring", index, static_cast<unsigned>(n));
+  if (n > 0) LOG_ERR("DASH", "space %d wrong size (%d), ignoring", index, n);
   return false;
 }
 
@@ -91,13 +103,17 @@ void DashboardActivity::persistState() {
 void DashboardActivity::loadState() {
   spaceCount = 1;
   currentSpace = 0;
-  char buf[8];
-  const size_t n = Storage.readFileToBuffer(STATE_PATH, buf, sizeof(buf), sizeof(buf));
-  if (n == sizeof(buf)) {
+  // Same trap as loadSpaceFrame(): readFileToBuffer() reserves a byte for its NUL,
+  // so an 8-byte read into an 8-byte buffer can never come back whole. Read the two
+  // int32s straight into an aligned array (no cast -> RISC-V unaligned-load safe).
+  if (Storage.exists(STATE_PATH)) {
+    HalFile file;
     int32_t data[2];
-    memcpy(data, buf, sizeof(data));  // memcpy: RISC-V unaligned-load safe
-    spaceCount = data[0];
-    currentSpace = data[1];
+    if (Storage.openFileForRead("DASH", STATE_PATH, file) &&
+        file.read(data, sizeof(data)) == static_cast<int>(sizeof(data))) {
+      spaceCount = data[0];
+      currentSpace = data[1];
+    }
   }
   if (spaceCount < 1) spaceCount = 1;
   if (spaceCount > MAX_SPACES) spaceCount = MAX_SPACES;
@@ -146,6 +162,10 @@ void DashboardActivity::onExit() {
     server.reset();
   }
   WiFi.disconnect(/*wifioff=*/false);
+  if (firmwareOpen) {
+    firmwareFile.close();
+    firmwareOpen = false;
+  }
   frame.reset();
   renderer.setOrientation(GfxRenderer::Portrait);  // restore the launcher's orientation
   // NOTE: unlike CrossPointWebServerActivity::onExit(), we deliberately do NOT
@@ -208,12 +228,20 @@ void DashboardActivity::startServer() {
   }
   // Two-lambda upload form: the second lambda streams the body chunk-by-chunk,
   // the first runs once the upload completes (like the stock /upload endpoint).
+  // Every route this activity owns lives under /api/. (The stock file-server
+  // activity's own endpoints — /upload, /files — are a separate namespace.)
   server->on(
-      "/frame", HTTP_POST, [this] { handleFrameDone(); }, [this] { handleFrameUpload(); });
+      "/api/frame", HTTP_POST, [this] { handleFrameDone(); }, [this] { handleFrameUpload(); });
+  server->on(
+      "/api/firmware", HTTP_POST, [this] { handleFirmwareDone(); },
+      [this] { handleFirmwareUpload(); });
+  server->on("/api/status", HTTP_GET, [this] { handleStatus(); });
   server->on("/", HTTP_GET, [this] {
     server->send(200, "text/plain",
-                 "CrossPoint dashboard. POST a packed 1-bit frame to "
-                 "/frame?space=<i>&count=<n>&show=<0|1>.\n");
+                 "CrossPoint dashboard.\n"
+                 "  GET  /api/status                                (device status JSON)\n"
+                 "  POST /api/frame?space=<i>&count=<n>&show=<0|1>  (packed 1-bit frame)\n"
+                 "  POST /api/firmware                              (firmware .bin -> SD /update.bin)\n");
   });
   server->onNotFound([this] { server->send(404, "text/plain", "Not found\n"); });
   server->begin();
@@ -287,6 +315,84 @@ void DashboardActivity::handleFrameDone() {
   }
   // If we're on the System space, its screen is drawn live — nothing to restore.
   LOG_INF("DASH", "Saved space %d (of %d)%s", space, count, show ? ", showing" : "");
+}
+
+// Stream an uploaded firmware image straight to the SD card (it can be ~5 MB, so
+// never buffer it in RAM). We only save the file — the user flashes it with the
+// stock recovery flow (hold POWER + UP at boot), so nothing here touches otadata.
+void DashboardActivity::handleFirmwareUpload() {
+  HTTPUpload& up = server->upload();
+  if (up.status == UPLOAD_FILE_START) {
+    if (firmwareOpen) firmwareFile.close();
+    firmwareWritten = 0;
+    firmwareOpen = Storage.openFileForWrite("DASH", FIRMWARE_PATH, firmwareFile);
+    if (!firmwareOpen) LOG_ERR("DASH", "firmware: open %s for write failed", FIRMWARE_PATH);
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    esp_task_wdt_reset();
+    if (firmwareOpen) {
+      const size_t n = firmwareFile.write(up.buf, up.currentSize);
+      if (n != up.currentSize) {
+        LOG_ERR("DASH", "firmware: SD write short (%u/%u)", static_cast<unsigned>(n),
+                static_cast<unsigned>(up.currentSize));
+        firmwareFile.close();
+        firmwareOpen = false;
+      } else {
+        firmwareWritten += n;
+      }
+    }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (firmwareOpen) {
+      firmwareFile.flush();
+      firmwareFile.close();
+      firmwareOpen = false;
+    }
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (firmwareOpen) {
+      firmwareFile.close();
+      firmwareOpen = false;
+    }
+    Storage.remove(FIRMWARE_PATH);
+    firmwareWritten = 0;
+  }
+}
+
+void DashboardActivity::handleFirmwareDone() {
+  if (firmwareOpen) {  // safety: END should have closed it already
+    firmwareFile.close();
+    firmwareOpen = false;
+  }
+  if (firmwareWritten == 0) {
+    server->send(400, "text/plain", "No firmware received\n");
+    return;
+  }
+  server->send(200, "text/plain",
+               String("Saved ") + FIRMWARE_PATH + " (" + static_cast<int>(firmwareWritten) +
+                   " bytes). On the X3, hold POWER + UP at boot to flash it.\n");
+  LOG_INF("DASH", "Firmware saved to %s (%u bytes)", FIRMWARE_PATH,
+          static_cast<unsigned>(firmwareWritten));
+  firmwareWritten = 0;
+}
+
+// Mirrors CrossPointWebServer::handleStatus() so the web companion's device probe
+// works in dashboard mode too — the stock endpoint lives in the file-server activity,
+// which isn't running here. The first seven fields must keep the stock names and
+// types (the web UI keys off `mode == "STA"`); the dashboard extras are additive.
+void DashboardActivity::handleStatus() const {
+  JsonDocument doc;
+  doc["version"] = CROSSPOINT_VERSION;
+  doc["ip"] = WiFi.localIP().toString();
+  doc["mode"] = "STA";  // the dashboard only ever joins an existing network
+  doc["rssi"] = WiFi.RSSI();
+  doc["freeHeap"] = ESP.getFreeHeap();
+  doc["uptime"] = millis() / 1000;
+  doc["device"] = gpio.deviceIsX3() ? "X3" : "X4";
+  doc["activity"] = "dashboard";
+  doc["spaces"] = spaceCount;
+  doc["space"] = currentSpace == SYSTEM_SPACE ? -1 : currentSpace;  // -1 = System page
+
+  String json;
+  serializeJson(doc, json);
+  server->send(200, "application/json", json);
 }
 
 // Side-button navigation. The cycle is: pushed spaces 0..spaceCount-1, then the

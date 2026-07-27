@@ -2,7 +2,13 @@
 // 1-bit PNG ready to push to the X3. Kept separate from monochrome.js (which is
 // pure/DOM-free) so the pixel logic stays unit-testable in node.
 
-import type { Dashboard, ListWidget, MetricWidget, TextWidget, Widget } from "./types";
+import type {
+  Dashboard,
+  PlacedListWidget,
+  PlacedMetricWidget,
+  PlacedTextWidget,
+  PlacedWidget,
+} from "./types";
 import { packMonoToBits, thresholdRgbaToMono } from "./monochrome.js";
 
 const PAD = 14;
@@ -16,7 +22,7 @@ export function drawDashboard(ctx: CanvasRenderingContext2D, dash: Dashboard): v
   for (const widget of dash.widgets) drawWidget(ctx, widget);
 }
 
-function drawWidget(ctx: CanvasRenderingContext2D, widget: Widget): void {
+function drawWidget(ctx: CanvasRenderingContext2D, widget: PlacedWidget): void {
   ctx.lineWidth = 2;
   ctx.strokeRect(widget.x + 1, widget.y + 1, widget.w - 2, widget.h - 2);
   switch (widget.type) {
@@ -32,7 +38,7 @@ function drawWidget(ctx: CanvasRenderingContext2D, widget: Widget): void {
   }
 }
 
-function drawMetric(ctx: CanvasRenderingContext2D, w: MetricWidget): void {
+function drawMetric(ctx: CanvasRenderingContext2D, w: PlacedMetricWidget): void {
   ctx.textAlign = "left";
   ctx.font = "600 20px sans-serif";
   ctx.fillText(clip(ctx, w.label.toUpperCase(), w.w - PAD * 2), w.x + PAD, w.y + PAD);
@@ -44,7 +50,7 @@ function drawMetric(ctx: CanvasRenderingContext2D, w: MetricWidget): void {
   }
 }
 
-function drawList(ctx: CanvasRenderingContext2D, w: ListWidget): void {
+function drawList(ctx: CanvasRenderingContext2D, w: PlacedListWidget): void {
   ctx.textAlign = "left";
   ctx.font = "700 22px sans-serif";
   ctx.fillText(clip(ctx, w.title.toUpperCase(), w.w - PAD * 2), w.x + PAD, w.y + PAD);
@@ -62,7 +68,7 @@ function drawList(ctx: CanvasRenderingContext2D, w: ListWidget): void {
   }
 }
 
-function drawText(ctx: CanvasRenderingContext2D, w: TextWidget): void {
+function drawText(ctx: CanvasRenderingContext2D, w: PlacedTextWidget): void {
   const size = w.size ?? 28;
   ctx.font = `600 ${size}px sans-serif`;
   const align = w.align ?? "left";

@@ -1,20 +1,43 @@
 // Declarative dashboard model. The whole point of the design: flexibility lives
 // here (and in the renderer), off-device. Adding a new metric never touches the
 // firmware — you change this config and push a new frame.
+//
+// Positions are stored as *grid* coordinates, never pixels. Pixel rects are
+// derived by `grid.js` at draw/push time, which makes overlapping tiles
+// impossible to express (grid cells are disjoint). See grid.js for the math.
 
 /** X3 e-ink geometry (portrait). Verified against firmware @ 1.4.1. */
 export const DASHBOARD_WIDTH = 792;
 export const DASHBOARD_HEIGHT = 528;
 
+/** Current schema version of the persisted builder state (see grid.js migration). */
+export const SPACES_SCHEMA_VERSION = 2;
+
 export type WidgetType = "metric" | "list" | "text";
 
-export type WidgetBase = {
+/** How a space is divided up. Shared by every widget in that space. */
+export type GridSpec = {
+  cols: number;
+  rows: number;
+  /** Empty pixels around the canvas edge. */
+  margin: number;
+  /** Empty pixels between adjacent cells. */
+  gutter: number;
+};
+
+/** Where a widget sits on its space's grid. */
+export type Placement = {
+  col: number;
+  row: number;
+  colSpan: number;
+  rowSpan: number;
+};
+
+/** A computed pixel rect on the 792x528 canvas. Derived, never stored. */
+export type Rect = { x: number; y: number; w: number; h: number };
+
+type WidgetCommon = {
   id: string;
-  /** Top-left + size in device pixels on the 792x528 canvas. */
-  x: number;
-  y: number;
-  w: number;
-  h: number;
   /**
    * Optional data script: the body of an async function `(fetch) => …` that
    * fetches from an API and returns what to display. On refresh its result is
@@ -24,46 +47,52 @@ export type WidgetBase = {
 };
 
 /** A number/KPI tile: label, big value, optional delta line. */
-export type MetricWidget = WidgetBase & {
-  type: "metric";
-  label: string;
-  value: string;
-  delta?: string;
-};
-
+export type MetricFields = { type: "metric"; label: string; value: string; delta?: string };
 /** A titled list of lines (e.g. a TODO). */
-export type ListWidget = WidgetBase & {
-  type: "list";
-  title: string;
-  items: string[];
-};
-
+export type ListFields = { type: "list"; title: string; items: string[] };
 /** Free text block. */
-export type TextWidget = WidgetBase & {
+export type TextFields = {
   type: "text";
   text: string;
   size?: number;
   align?: "left" | "center";
 };
 
-export type Widget = MetricWidget | ListWidget | TextWidget;
+export type WidgetFields = MetricFields | ListFields | TextFields;
 
+/** A widget as stored and edited: display fields + grid placement. */
+export type Widget = WidgetCommon & Placement & WidgetFields;
+
+export type MetricWidget = WidgetCommon & Placement & MetricFields;
+export type ListWidget = WidgetCommon & Placement & ListFields;
+export type TextWidget = WidgetCommon & Placement & TextFields;
+
+/** A widget as handed to the renderer: display fields + a pixel rect. */
+export type PlacedWidget = WidgetCommon & Rect & WidgetFields;
+
+export type PlacedMetricWidget = WidgetCommon & Rect & MetricFields;
+export type PlacedListWidget = WidgetCommon & Rect & ListFields;
+export type PlacedTextWidget = WidgetCommon & Rect & TextFields;
+
+/** One laid-out page, ready to rasterize. */
 export type Dashboard = {
   width: number;
   height: number;
-  widgets: Widget[];
+  widgets: PlacedWidget[];
 };
 
-/** A "space" is one page of the dashboard — its own set of widgets. The X3 cycles
- * between spaces with the side buttons. */
+/** A "space" is one page of the dashboard — its own grid and set of widgets. The
+ * X3 cycles between spaces with the side buttons. */
 export type Space = {
   id: string;
   name: string;
+  grid: GridSpec;
   widgets: Widget[];
 };
 
 /** State persisted by the builder: the spaces and which one is being edited. */
 export type SpacesState = {
+  version: number;
   spaces: Space[];
   activeIndex: number;
 };
@@ -74,60 +103,66 @@ export function nextId(prefix = "w"): string {
   return `${prefix}${idCounter}`;
 }
 
-/** A sensible starter set of spaces (one space with the demo widgets). */
-export function defaultSpaces(): Space[] {
-  return [{ id: nextId("s"), name: "Space 1", widgets: defaultDashboard().widgets }];
+/** Grid a brand-new space starts on. */
+export function defaultGrid(): GridSpec {
+  return { cols: 2, rows: 2, margin: 16, gutter: 12 };
 }
 
-/** A sensible starter dashboard so the builder isn't empty on first load. */
-export function defaultDashboard(): Dashboard {
-  return {
-    width: DASHBOARD_WIDTH,
-    height: DASHBOARD_HEIGHT,
-    widgets: [
-      {
-        id: nextId(),
-        type: "metric",
-        x: 16,
-        y: 16,
-        w: 372,
-        h: 200,
-        label: "AAPL",
-        value: "229.35",
-        delta: "+1.24%",
-      },
-      {
-        id: nextId(),
-        type: "metric",
-        x: 404,
-        y: 16,
-        w: 372,
-        h: 200,
-        label: "Claude usage",
-        value: "68%",
-        delta: "resets 4:00pm",
-      },
-      {
-        id: nextId(),
-        type: "list",
-        x: 16,
-        y: 232,
-        w: 372,
-        h: 280,
-        title: "TODO",
-        items: ["Ship the X3 fork", "Wire up live metrics", "Dock + power test"],
-      },
-      {
-        id: nextId(),
-        type: "text",
-        x: 404,
-        y: 232,
-        w: 372,
-        h: 280,
-        text: "CROSSPOINT\nDASHBOARD",
-        size: 40,
-        align: "center",
-      },
-    ],
-  };
+/** An empty space, ready for widgets. */
+export function emptySpace(name: string): Space {
+  return { id: nextId("s"), name, grid: defaultGrid(), widgets: [] };
+}
+
+/** A sensible starter set of spaces (one space with the demo widgets). */
+export function defaultSpaces(): Space[] {
+  return [{ id: nextId("s"), name: "Space 1", grid: defaultGrid(), widgets: defaultWidgets() }];
+}
+
+/** Starter widgets so the builder isn't empty on first load — one per cell of a 2x2. */
+export function defaultWidgets(): Widget[] {
+  return [
+    {
+      id: nextId(),
+      type: "metric",
+      col: 0,
+      row: 0,
+      colSpan: 1,
+      rowSpan: 1,
+      label: "AAPL",
+      value: "229.35",
+      delta: "+1.24%",
+    },
+    {
+      id: nextId(),
+      type: "metric",
+      col: 1,
+      row: 0,
+      colSpan: 1,
+      rowSpan: 1,
+      label: "Claude usage",
+      value: "68%",
+      delta: "resets 4:00pm",
+    },
+    {
+      id: nextId(),
+      type: "list",
+      col: 0,
+      row: 1,
+      colSpan: 1,
+      rowSpan: 1,
+      title: "TODO",
+      items: ["Ship the X3 fork", "Wire up live metrics", "Dock + power test"],
+    },
+    {
+      id: nextId(),
+      type: "text",
+      col: 1,
+      row: 1,
+      colSpan: 1,
+      rowSpan: 1,
+      text: "CROSSPOINT\nDASHBOARD",
+      size: 40,
+      align: "center",
+    },
+  ];
 }

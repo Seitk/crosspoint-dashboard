@@ -14,6 +14,7 @@
 
 #include "activities/Activity.h"  // src/ is on the include path (not src/activities/)
 
+#include <HalStorage.h>  // HalFile — streams a firmware upload to the SD card
 #include <WebServer.h>   // Arduino-ESP32 core (bundled; no lib_deps entry needed)
 
 #include <cstddef>
@@ -39,6 +40,9 @@ class DashboardActivity : public Activity {
   void startServer();
   void handleFrameUpload();  // streams the multipart /frame body into `frame`
   void handleFrameDone();    // saves the frame to its space, displays if current
+  void handleFirmwareUpload();  // streams a firmware .bin upload to the SD card
+  void handleFirmwareDone();    // acks the upload (flash it via Power+Up recovery)
+  void handleStatus() const;    // /api/status, same JSON shape as the stock web server
   void drawStatusBar();      // top bar (device IP + battery) on the idle screen
   void drawSpaceIndicator(); // transient "which space" dots shown on a switch
   void drawSystemInfo();     // built-in System space: Wi-Fi / IP / battery / time / date
@@ -57,6 +61,9 @@ class DashboardActivity : public Activity {
   int spaceCount = 1;            // number of dashboard spaces (pages)
   int currentSpace = 0;          // which space is currently displayed
   unsigned long indicatorUntil = 0;  // millis() deadline for the space indicator (0 = off)
+  HalFile firmwareFile;              // open during a firmware upload
+  std::size_t firmwareWritten = 0;   // bytes written in the current firmware upload
+  bool firmwareOpen = false;
   char deviceIp[16] = {0};       // "255.255.255.255" + NUL, set on Wi-Fi connect
   bool haveFrame = false;
   bool wifiUp = false;
