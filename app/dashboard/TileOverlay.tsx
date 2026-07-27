@@ -12,13 +12,16 @@
 //
 // All placement decisions come from the pure helpers in grid.js; this file only
 // tracks pointer deltas and asks canPlace() whether a drop may commit.
+//
+// Exports only the component on purpose — Fast Refresh bails on a module that
+// mixes components with anything else, so the scale hook lives in its own file.
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import styles from "./dashboard.module.css";
 import { canPlace, cellRect, dragPlacement, resizePlacement } from "./grid.js";
 import { fieldAt, fieldLayout } from "./fields.js";
-import { DASHBOARD_WIDTH, type GridSpec, type Placement, type Widget } from "./types";
+import type { GridSpec, Placement, Widget } from "./types";
 
 /** Pointer travel (in canvas px) below which a gesture counts as a click, not a drag. */
 const CLICK_THRESHOLD = 4;
@@ -40,28 +43,7 @@ function tileLabel(w: Widget): string {
   return (w.text || "text").split("\n")[0];
 }
 
-/**
- * Ratio between the canvas's rendered width and its native 792px. Shared by the
- * overlay and the popover anchor so they can never disagree about where a tile is.
- * useLayoutEffect so the first paint is already aligned instead of flashing at 1.
- */
-export function useCanvasScale(canvasRef: React.RefObject<HTMLCanvasElement | null>): number {
-  const [scale, setScale] = useState(1);
-  useLayoutEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const measure = () => {
-      const w = canvas.getBoundingClientRect().width;
-      if (w > 0) setScale(w / DASHBOARD_WIDTH);
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(canvas);
-    return () => ro.disconnect();
-  }, [canvasRef]);
-  return scale;
-}
-
+/** A field's box as returned by fields.js — only what the overlay needs. */
 type FieldBox = { key: string; x: number; y: number; w: number; h: number };
 
 export default function TileOverlay({

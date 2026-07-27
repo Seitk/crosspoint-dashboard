@@ -10,7 +10,8 @@ import {
   renderDashboardToFrameBytes,
 } from "./render";
 import { applyScriptResult, proxiedFetch, runScript } from "./scripts";
-import TileOverlay, { useCanvasScale } from "./TileOverlay";
+import TileOverlay from "./TileOverlay";
+import { useCanvasScale } from "./useCanvasScale";
 import WidgetPopover from "./WidgetPopover";
 import FieldPopover from "./FieldPopover";
 import {
